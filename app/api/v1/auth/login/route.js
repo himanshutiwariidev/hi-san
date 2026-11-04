@@ -1,6 +1,7 @@
 import { db } from "@/lib/server/db";
-import { createSession, publicUser, verifyPassword } from "@/lib/server/auth";
+import { accessibleBusinesses, createSession, publicUser, verifyPassword } from "@/lib/server/auth";
 import { HttpError, readJson, route } from "@/lib/server/http";
+import { businessOut } from "@/lib/server/serializers";
 
 // ---------------------------------------------------------------------------
 // Hardcoded super-admin credentials (set via environment variables).
@@ -38,7 +39,6 @@ export const POST = route(async (request) => {
     if (password !== ADMIN_PASSWORD) {
       throw new HttpError(401, "invalid_credentials", "Invalid email or password.");
     }
-    // Return a synthetic admin user object (no DB row needed).
     const adminUser = {
       id:           "admin",
       tenant_id:    "admin",
@@ -48,9 +48,15 @@ export const POST = route(async (request) => {
       created_at:   new Date().toISOString(),
       last_login:   new Date().toISOString(),
     };
-    // Persist a real session so cookies / requireUser() work normally.
-    await createSession("admin");
-    return Response.json({ user: adminUser });
+    const token = await createSession("admin");
+    const businesses = accessibleBusinesses(adminUser);
+    const defaultBusiness = businesses[0] ? businessOut(businesses[0]) : null;
+    return Response.json({
+      access_token: token,
+      token_type: "bearer",
+      user: adminUser,
+      default_business: defaultBusiness,
+    });
   }
 
   // ── 2. Normal DB-based login ─────────────────────────────────────────────
@@ -58,6 +64,13 @@ export const POST = route(async (request) => {
   if (!user || !verifyPassword(password, user.password_hash)) {
     throw new HttpError(401, "invalid_credentials", "Invalid email or password.");
   }
-  await createSession(user.id);
-  return Response.json({ user: publicUser(user) });
+  const token = await createSession(user.id);
+  const businesses = accessibleBusinesses(user);
+  const defaultBusiness = businesses[0] ? businessOut(businesses[0]) : null;
+  return Response.json({
+    access_token: token,
+    token_type: "bearer",
+    user: publicUser(user),
+    default_business: defaultBusiness,
+  });
 });

@@ -60,13 +60,27 @@ export default function LeadModal({ lead, onClose }) {
           rows={[
             ["Name", lead.buyer_name],
             ["Company", lead.company],
-            ["Location", <CountryFlag key="c" country={{ ...lead.country, name: [lead.city, lead.country.name].filter(Boolean).join(", ") }} />],
+            ["Location", <CountryFlag key="c" country={{ ...lead.country, name: [lead.city, lead.state, lead.country.name].filter(Boolean).join(", ") }} />],
+            ["Address", lead.address],
+            ["GST Verified", lead.gst_verified ? "Yes (GST Registered)" : "Not verified"],
             ["Email", lead.email ? <a key="e" href={`mailto:${lead.email}`} className="text-accent-dark">{lead.email}</a> : null],
             ["Phone", lead.phone ? <a key="p" href={`tel:${lead.phone}`} className="text-accent-dark">{lead.phone}</a> : null],
+            ...(lead.purchase_id ? [["Purchase ID", lead.purchase_id]] : []),
+            ...(lead.credit_balance ? [["Credit Balance", lead.credit_balance]] : []),
           ]}
         >
-          <div className="mt-3.5">
+          <div className="mt-3.5 flex flex-wrap items-center gap-2">
             <ContactPills contacts={lead.contacts} />
+            {lead.phone ? (
+              <a
+                href={`https://wa.me/${String(lead.phone).replace(/\D/g, "")}`}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1.5 rounded-full bg-emerald-600 px-3 py-1 text-xs font-bold text-white shadow-sm hover:bg-emerald-700"
+              >
+                💬 Chat on WhatsApp
+              </a>
+            ) : null}
           </div>
         </DetailPanel>
       </div>

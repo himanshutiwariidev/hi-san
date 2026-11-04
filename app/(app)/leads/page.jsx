@@ -15,6 +15,7 @@ import { ContactPills } from "@/components/leads/Contacts";
 import { useApp } from "@/components/AppContext";
 import { apiClient } from "@/lib/api";
 import { formatDateTime } from "@/lib/format";
+import { formatSkipReason } from "@/lib/geo";
 import { useResource } from "@/lib/useResource";
 
 const DAY = 24 * 3600 * 1000;
@@ -96,9 +97,9 @@ function LeadsView() {
   }, [inRange, statusParam, keyword, country, contact, query]);
 
   function exportCsv() {
-    const header = ["indiamart_id", "title", "quantity", "keyword", "buyer", "company", "city", "country", "email", "phone", "status", "reason", "received_at"];
+    const header = ["indiamart_id", "title", "quantity", "unit", "keyword", "buyer", "company", "city", "state", "country", "email", "phone", "gst_verified", "status", "decision", "reason", "received_at"];
     const lines = rows.map((l) =>
-      [l.external_id, l.title, l.quantity, l.matched_keyword, l.buyer_name, l.company, l.city, l.country.name, l.email, l.phone, l.status, l.filter_reason, l.received_at]
+      [l.external_id, l.title, l.quantity, l.unit, l.matched_keyword, l.buyer_name, l.company, l.city, l.state, l.country.name, l.email, l.phone, l.gst_verified ? "Yes" : "No", l.status, l.decision, l.filter_reason, l.received_at]
         .map((v) => `"${String(v ?? "").replace(/"/g, '""')}"`)
         .join(",")
     );
@@ -199,21 +200,38 @@ function LeadsView() {
             {rows.map((lead) => (
               <tr key={lead.id}>
                 <Td>
-                  <div className="grid max-w-[500px] items-start gap-2">
-                    <strong className="text-[15px] leading-tight text-text">{lead.buyer_name ?? (lead.status === "retrieved" ? "Buyer" : "Not bought")}</strong>
+                  <div className="grid max-w-[500px] items-start gap-1.5">
+                    <div className="flex items-center gap-2">
+                      <strong className="text-[15px] leading-tight text-text">{lead.buyer_name ?? (lead.status === "retrieved" ? "Buyer" : "Not bought")}</strong>
+                      {lead.gst_verified ? (
+                        <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-bold text-emerald-800">GST</span>
+                      ) : null}
+                    </div>
                     {lead.company ? <span className="text-[13px] text-muted">{lead.company}</span> : null}
-                    <CountryFlag country={{ ...lead.country, name: [lead.city, lead.country.name].filter(Boolean).join(", ") }} />
+                    <CountryFlag country={{ ...lead.country, name: [lead.city, lead.state, lead.country.name].filter(Boolean).join(", ") }} />
                     {lead.email || lead.phone ? (
-                      <span className="mt-1 block text-[13px] leading-[1.3] font-bold [overflow-wrap:anywhere] text-accent-dark">
-                        {[lead.email, lead.phone].filter(Boolean).join(" · ")}
-                      </span>
+                      <div className="mt-1 flex flex-wrap items-center gap-2">
+                        <span className="text-[13px] leading-[1.3] font-bold text-accent-dark">
+                          {[lead.email, lead.phone].filter(Boolean).join(" · ")}
+                        </span>
+                        {lead.phone ? (
+                          <a
+                            href={`https://wa.me/${String(lead.phone).replace(/\D/g, "")}`}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="inline-flex items-center rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-bold text-emerald-700 hover:bg-emerald-100"
+                          >
+                            WhatsApp
+                          </a>
+                        ) : null}
+                      </div>
                     ) : null}
                   </div>
                 </Td>
                 <Td>
                   <span className="block font-semibold">{lead.title}</span>
                   <span className="mt-1 block text-xs text-muted">
-                    {[lead.quantity, lead.matched_keyword && `keyword: ${lead.matched_keyword}`].filter(Boolean).join(" · ")}
+                    {[lead.quantity && `${lead.quantity} ${lead.unit ?? ""}`.trim(), lead.matched_keyword && `keyword: ${lead.matched_keyword}`].filter(Boolean).join(" · ")}
                   </span>
                   {lead.posted_text ? <span className="mt-1 block text-xs text-muted">Posted {lead.posted_text}</span> : null}
                 </Td>
@@ -222,7 +240,7 @@ function LeadsView() {
                 </Td>
                 <Td>
                   <LeadStatus status={lead.status} />
-                  {lead.filter_reason ? <span className="mt-1 block text-xs text-accent-dark">{lead.filter_reason}</span> : null}
+                  {lead.filter_reason ? <span className="mt-1 block text-xs font-semibold text-accent-dark">{formatSkipReason(lead.filter_reason)}</span> : null}
                 </Td>
                 <Td className="whitespace-nowrap text-[13px]">{formatDateTime(lead.received_at)}</Td>
                 <Td>
