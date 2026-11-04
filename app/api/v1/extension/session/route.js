@@ -14,6 +14,9 @@ export const POST = route(async (request) => {
     ).run(id, businessId, ts, ts);
   }
 
-  return Response.json({ id, business_id: businessId });
+  return Response.json({
+    installation_id: id,
+    id,
+    business_id: businessId,
+  });
 });
-

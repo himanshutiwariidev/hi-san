@@ -557,7 +557,7 @@ var require_dexie = __commonJS({
         };
       }
       var debug = typeof location !== "undefined" && /^(http|https):\/\/(localhost|127\.0\.0\.1)/.test(location.href);
-      function setDebug(value, filter2) {
+      function setDebug(value, filter3) {
         debug = value;
       }
       var INTERNAL = {};
@@ -1190,10 +1190,10 @@ var require_dexie = __commonJS({
       var DBNAMES_DB = "__dbnames";
       var READONLY = "readonly";
       var READWRITE = "readwrite";
-      function combine(filter1, filter2) {
-        return filter1 ? filter2 ? function() {
-          return filter1.apply(this, arguments) && filter2.apply(this, arguments);
-        } : filter1 : filter2;
+      function combine(filter1, filter22) {
+        return filter1 ? filter22 ? function() {
+          return filter1.apply(this, arguments) && filter22.apply(this, arguments);
+        } : filter1 : filter22;
       }
       var AnyRange = {
         type: 3,
@@ -1919,13 +1919,13 @@ var require_dexie = __commonJS({
         });
       }
       function iter(ctx, fn, coreTrans, coreTable) {
-        var filter2 = ctx.replayFilter ? combine(ctx.filter, ctx.replayFilter()) : ctx.filter;
+        var filter3 = ctx.replayFilter ? combine(ctx.filter, ctx.replayFilter()) : ctx.filter;
         if (!ctx.or) {
-          return iterate(openCursor(ctx, coreTable, coreTrans), combine(ctx.algorithm, filter2), fn, !ctx.keysOnly && ctx.valueMapper);
+          return iterate(openCursor(ctx, coreTable, coreTrans), combine(ctx.algorithm, filter3), fn, !ctx.keysOnly && ctx.valueMapper);
         } else {
           var set_1 = {};
           var union = function(item, cursor, advance) {
-            if (!filter2 || filter2(cursor, advance, function(result) {
+            if (!filter3 || filter3(cursor, advance, function(result) {
               return cursor.stop(result);
             }, function(err) {
               return cursor.fail(err);
@@ -1946,7 +1946,7 @@ var require_dexie = __commonJS({
           ]);
         }
       }
-      function iterate(cursorPromise, filter2, fn, valueMapper) {
+      function iterate(cursorPromise, filter3, fn, valueMapper) {
         var mappedFn = valueMapper ? function(x, c, a) {
           return fn(valueMapper(x), c, a);
         } : fn;
@@ -1957,7 +1957,7 @@ var require_dexie = __commonJS({
               var c = function() {
                 return cursor.continue();
               };
-              if (!filter2 || filter2(cursor, function(advancer) {
+              if (!filter3 || filter3(cursor, function(advancer) {
                 return c = advancer;
               }, function(val) {
                 cursor.stop(val);
@@ -2151,8 +2151,8 @@ var require_dexie = __commonJS({
           addMatchFilter(this._ctx, filterFunction);
           return this;
         };
-        Collection2.prototype.and = function(filter2) {
-          return this.filter(filter2);
+        Collection2.prototype.and = function(filter3) {
+          return this.filter(filter3);
         };
         Collection2.prototype.or = function(indexName) {
           return new this.db.WhereClause(this._ctx.table, indexName, this);
@@ -6230,24 +6230,6 @@ var require_dexie = __commonJS({
 });
 
 // ../../packages/schemas/dist/index.js
-var HARD_DAILY_CAPTURE_LIMIT = 11;
-var FILTER_CHECK_ORDER = [
-  { title: "Readable lead", detail: "Leads without a real title are skipped." },
-  { title: "Lead age", detail: "Older than Max lead age is skipped." },
-  { title: "Country", detail: "Must be one of the allowed countries (if any are set)." },
-  { title: "Indian state", detail: "Leads from India must come from an allowed state (if any are set)." },
-  {
-    title: "Contact",
-    detail: 'Email setting, then Phone setting, then Any Contact decides how they combine. With "Trusted buyers skip contact filter" on, a buyer on IndiaMART 1+ years with any email or phone shown or verified passes this check; every other check still applies.'
-  },
-  { title: "GST verified", detail: 'Only when "Only GST-verified buyers" is on.' },
-  { title: "Buyer membership", detail: "Buyer must be on IndiaMART for at least the minimum months." },
-  { title: "Category", detail: "Blocked categories are skipped; with an allow list, the category must be on it." },
-  { title: "Excluded keywords", detail: "Any excluded keyword in the title skips the lead." },
-  { title: "Keyword match", detail: "A keyword must match the title, with its own country, state, unit and minimum quantity." },
-  { title: "Retail", detail: "Below the retail quantity, or marked Retail by IndiaMART when retail leads are off." },
-  { title: "Daily limits", detail: `Each keyword's limit, then the business limit (never above ${HARD_DAILY_CAPTURE_LIMIT} a day).` }
-];
 var SKIP_REASON_LABELS = {
   country_not_allowed: "Country Not Matched",
   contact_requirement_not_met: "Contact Not Matched",
@@ -6320,8 +6302,8 @@ function isFiltered(row) {
 function isUnsynced(row) {
   return row.sync_state !== "ACKED";
 }
-function matchesFilter(row, filter2) {
-  switch (filter2) {
+function matchesFilter(row, filter3) {
+  switch (filter3) {
     case "captured":
       return isCaptured(row);
     case "filtered":
@@ -6619,14 +6601,270 @@ async function listActivity(db, businessId, limit = 1e3) {
 }
 var outboxDb = new OutboxDatabase();
 
+// src/expired-interest.ts
+var EXPIRED_INTEREST_ENABLED_KEY = "expiredInterestEnabled";
+var EXPIRED_INTEREST_LOG_KEY = "expiredInterestLog";
+var EXPIRED_INTEREST_STATS_KEY = "expiredInterestStats";
+var EXPIRED_INTEREST_STATUS_KEY = "expiredInterestStatus";
+var EXPIRED_INTEREST_LAST_SCAN_KEY = "expiredInterestLastScan";
+var EXPIRED_LOCK_STALE_MS = 3 * 6e4;
+var RANK_REASON_TEXT = {
+  matched: "Keyword and country match",
+  invalid_title: "Title not usable",
+  negative_keyword_match: "Negative keyword",
+  no_positive_keyword_match: "No keyword match",
+  country_not_allowed: "Country not allowed",
+  state_not_allowed: "State not allowed",
+  keyword_country_mismatch: "Country not allowed for this keyword"
+};
+var SCAN_ACTION_TEXT = {
+  queued: "Waiting to send",
+  marked: "Interested \u2713",
+  already: "Already shortlisted",
+  failed: "Failed",
+  retry: "No answer, retrying",
+  skipped: "Not sent",
+  handled_before: "Handled in an earlier scan"
+};
+function scanActionText(action) {
+  return SCAN_ACTION_TEXT[action] ?? action;
+}
+function rankReasonText(reason) {
+  return RANK_REASON_TEXT[reason] ?? reason;
+}
+function emptyStats(utcDate) {
+  return { utc_date: utcDate, sent_today: 0, sent_total: 0, last_scan_at: null, last_scan: null, last_error: null };
+}
+function statsForDay(stored, utcDate) {
+  const stats = stored && typeof stored === "object" ? stored : null;
+  if (!stats) {
+    return emptyStats(utcDate);
+  }
+  return stats.utc_date === utcDate ? stats : { ...stats, utc_date: utcDate, sent_today: 0 };
+}
+function statusLabel(status) {
+  switch (status) {
+    case "interested":
+      return "Interested \u2713";
+    case "already":
+      return "Already shortlisted";
+    default:
+      return "Failed";
+  }
+}
+var RUN_STATUS_TEXT = {
+  running: "Running",
+  stopped: "Stopped",
+  not_signed_in: "Sign in to start",
+  billing_not_confirmed: "Waiting for plan check",
+  filter_config_not_loaded: "Keywords not loaded yet",
+  safety_brake: "Paused for account safety",
+  other_tab: "Running in another IndiaMART tab",
+  not_logged_in_indiamart: "Log in to IndiaMART",
+  list_failed: "Could not read expired leads; retrying"
+};
+function runStatusText(state) {
+  return RUN_STATUS_TEXT[state ?? ""] ?? (state || "Open an IndiaMART BuyLeads tab");
+}
+
+// src/lead-decision.ts
+function utcDateString(now = Date.now()) {
+  return new Date(now).toISOString().slice(0, 10);
+}
+
+// src/rank-log-view.ts
+var ACTIVITY_PANEL_VIEW_KEY = "activityPanelView";
+function readRankLog(value) {
+  return Array.isArray(value) ? value : [];
+}
+function matchesRankFilter(entry, filter3) {
+  return filter3 === "all" || entry.status === filter3;
+}
+function matchesRankSearch(entry, query) {
+  const needle = query.trim().toLowerCase();
+  if (!needle) {
+    return true;
+  }
+  return [entry.title, entry.country, entry.offer_id, entry.error, statusLabel(entry.status), ...entry.keywords].some(
+    (value) => (value ?? "").toLowerCase().includes(needle)
+  );
+}
+function countRankLog(entries) {
+  return {
+    all: entries.length,
+    interested: entries.filter((entry) => entry.status === "interested").length,
+    already: entries.filter((entry) => entry.status === "already").length,
+    failed: entries.filter((entry) => entry.status === "failed").length
+  };
+}
+function rankLogRow(entry, tag = "li") {
+  const item = document.createElement(tag);
+  item.className = "rank-row";
+  const title = document.createElement("strong");
+  title.textContent = entry.title;
+  const meta = document.createElement("div");
+  meta.className = "rank-meta";
+  const badge = document.createElement("span");
+  badge.className = "rank-badge";
+  badge.dataset.status = entry.status;
+  badge.textContent = entry.status === "failed" && entry.error ? `${statusLabel(entry.status)} \xB7 ${entry.error}` : statusLabel(entry.status);
+  const parts = [entry.country, entry.keywords.length ? `Keyword: ${entry.keywords.join(", ")}` : null, relativeTime(entry.at)].filter(
+    (part) => Boolean(part)
+  );
+  meta.append(badge, ...parts.map((part) => Object.assign(document.createElement("span"), { textContent: part })));
+  item.append(title, meta);
+  return item;
+}
+
+// src/popup-rank.ts
+var STATUS_STALE_MS = 15e4;
+function interestStatusLine(enabled, status, now = Date.now()) {
+  if (!enabled) {
+    return { text: "Stopped", tone: "" };
+  }
+  const at = Date.parse(status?.at ?? "");
+  if (!status || !Number.isFinite(at) || now - at > STATUS_STALE_MS) {
+    return { text: "Waiting: open an IndiaMART BuyLeads tab", tone: "warn" };
+  }
+  return { text: runStatusText(status.state), tone: status.state === "running" ? "ok" : "warn" };
+}
+
+// src/sidepanel-rank.ts
+var KEYS = [
+  EXPIRED_INTEREST_ENABLED_KEY,
+  EXPIRED_INTEREST_LOG_KEY,
+  EXPIRED_INTEREST_STATS_KEY,
+  EXPIRED_INTEREST_STATUS_KEY,
+  EXPIRED_INTEREST_LAST_SCAN_KEY
+];
+var filter = "all";
+var search = "";
+function $(selector) {
+  return document.querySelector(selector);
+}
+function showView(view) {
+  $("#view-leads").hidden = view !== "leads";
+  $("#view-rank").hidden = view !== "rank";
+  for (const button of document.querySelectorAll(".view-button")) {
+    const active = button.dataset.view === view;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  }
+  if (view === "rank") {
+    void paint();
+  }
+}
+function scanRow(row) {
+  const item = document.createElement("li");
+  item.className = "rank-row";
+  const title = document.createElement("strong");
+  title.textContent = row.title;
+  const meta = document.createElement("div");
+  meta.className = "rank-meta";
+  const chip = Object.assign(document.createElement("span"), { className: "rank-chip", textContent: `Rank ${row.rank}` });
+  chip.dataset.rank = row.rank;
+  const action = Object.assign(document.createElement("span"), { className: "rank-badge", textContent: scanActionText(row.action) });
+  action.dataset.status = row.action === "marked" ? "interested" : row.action;
+  const parts = [
+    rankReasonText(row.reason),
+    row.country,
+    row.keywords.length ? `Keyword: ${row.keywords.join(", ")}` : null,
+    row.shortlisted ? "Shortlisted on IndiaMART" : null
+  ].filter((part) => Boolean(part));
+  meta.append(chip, action, ...parts.map((part) => Object.assign(document.createElement("span"), { textContent: part })));
+  item.append(title, meta);
+  return item;
+}
+async function paint() {
+  const values = await chrome.storage.local.get(KEYS).catch(() => ({}));
+  const enabled = values[EXPIRED_INTEREST_ENABLED_KEY] === true;
+  const toggle = $("#rank-toggle");
+  toggle.textContent = enabled ? "Stop" : "Start";
+  toggle.classList.toggle("stopped", !enabled);
+  const line = interestStatusLine(enabled, values[EXPIRED_INTEREST_STATUS_KEY]);
+  const status = $("#rank-status");
+  status.textContent = line.text;
+  status.dataset.tone = line.tone;
+  const stats = statsForDay(values[EXPIRED_INTEREST_STATS_KEY], utcDateString());
+  $("#rank-today").textContent = String(stats.sent_today);
+  $("#rank-total").textContent = String(stats.sent_total);
+  const scan = stats.last_scan;
+  $("#rank-scan").textContent = scan && stats.last_scan_at ? `Last scan ${relativeTime(stats.last_scan_at)}: A ${scan.A} \xB7 B ${scan.B} \xB7 C ${scan.C} \xB7 already shortlisted ${scan.already_shortlisted}` : "No scan yet";
+  const error = $("#rank-error");
+  error.hidden = !stats.last_error;
+  error.textContent = stats.last_error ? `Last error: ${stats.last_error}` : "";
+  const lastScan = Array.isArray(values[EXPIRED_INTEREST_LAST_SCAN_KEY]) ? values[EXPIRED_INTEREST_LAST_SCAN_KEY] : [];
+  $("#rank-lastscan-count").textContent = String(lastScan.length);
+  $("#rank-lastscan-list").replaceChildren(...lastScan.map(scanRow));
+  $("#rank-lastscan-empty").hidden = lastScan.length > 0;
+  const log = readRankLog(values[EXPIRED_INTEREST_LOG_KEY]);
+  const counts = countRankLog(log);
+  for (const key of Object.keys(counts)) {
+    $(`#rank-count-${key}`).textContent = String(counts[key]);
+  }
+  const visible = log.filter((entry) => matchesRankFilter(entry, filter) && matchesRankSearch(entry, search));
+  $("#rank-list").replaceChildren(...visible.map((entry) => rankLogRow(entry, "article")));
+  $("#rank-empty").hidden = visible.length > 0;
+  $("#rank-empty-title").textContent = log.length ? "Nothing matches" : "No rank A leads yet";
+}
+function initRankView() {
+  for (const button of document.querySelectorAll(".view-button")) {
+    button.addEventListener("click", () => {
+      const view = button.dataset.view ?? "leads";
+      showView(view);
+      void chrome.storage.local.set({ [ACTIVITY_PANEL_VIEW_KEY]: view }).catch(() => void 0);
+    });
+  }
+  for (const button of document.querySelectorAll(".rank-filter")) {
+    button.addEventListener("click", () => {
+      filter = button.dataset.rankFilter ?? "all";
+      for (const other of document.querySelectorAll(".rank-filter")) {
+        const active = other === button;
+        other.classList.toggle("active", active);
+        other.setAttribute("aria-pressed", String(active));
+      }
+      void paint();
+    });
+  }
+  $("#rank-search").addEventListener("input", (event) => {
+    search = event.target.value;
+    void paint();
+  });
+  $("#rank-toggle").addEventListener("click", async () => {
+    const values = await chrome.storage.local.get([EXPIRED_INTEREST_ENABLED_KEY]);
+    await chrome.storage.local.set({ [EXPIRED_INTEREST_ENABLED_KEY]: values[EXPIRED_INTEREST_ENABLED_KEY] !== true });
+  });
+  $("#rank-clear").addEventListener("click", () => {
+    void chrome.storage.local.set({ [EXPIRED_INTEREST_LOG_KEY]: [] });
+  });
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== "local") {
+      return;
+    }
+    const requested = changes[ACTIVITY_PANEL_VIEW_KEY]?.newValue;
+    if (requested === "rank" || requested === "leads") {
+      showView(requested);
+    }
+    if (!$("#view-rank").hidden && KEYS.some((key) => key in changes)) {
+      void paint();
+    }
+  });
+  window.setInterval(() => {
+    if (!$("#view-rank").hidden) {
+      void paint();
+    }
+  }, 15e3);
+  void chrome.storage.local.get([ACTIVITY_PANEL_VIEW_KEY]).then((values) => showView(values[ACTIVITY_PANEL_VIEW_KEY] === "rank" ? "rank" : "leads")).catch(() => void 0);
+}
+
 // src/sidepanel.ts
 var REFRESH_KEYS = ["selectedBusinessId", "authSession", "businesses"];
 var PERIODIC_REFRESH_MS = 6e4;
 var TIME_LABEL_REFRESH_MS = 15e3;
 var MAX_ROWS = 1e3;
-var filter = "all";
+var filter2 = "all";
 var reasonFilter = null;
-var search = "";
+var search2 = "";
 var rows = [];
 var rowsById = /* @__PURE__ */ new Map();
 var renderedById = /* @__PURE__ */ new Map();
@@ -6675,7 +6913,7 @@ function upsertRows(changed) {
     rowsById.set(row.client_event_id, row);
   }
   setRows([...rowsById.values()]);
-  paint();
+  paint2();
   document.querySelector("#log-updated-text").textContent = `Live \xB7 ${(/* @__PURE__ */ new Date()).toLocaleTimeString()}`;
 }
 function badgeElement(badge) {
@@ -6787,7 +7025,7 @@ function paintCounts() {
 function paintReasons() {
   const container = document.querySelector("#reason-breakdown");
   container.replaceChildren();
-  container.hidden = filter !== "filtered";
+  container.hidden = filter2 !== "filtered";
   if (container.hidden) {
     return;
   }
@@ -6798,7 +7036,7 @@ function paintReasons() {
     chip.textContent = `${label} \xB7 ${count}`;
     chip.addEventListener("click", () => {
       reasonFilter = reasonFilter === reason ? null : reason;
-      paint();
+      paint2();
     });
     container.append(chip);
   }
@@ -6844,11 +7082,11 @@ function refreshTimeLabels() {
     time.textContent = relativeTime(time.dateTime);
   }
 }
-function paint() {
+function paint2() {
   paintCounts();
   paintReasons();
   const visible = rows.filter(
-    (row) => matchesFilter(row, filter) && (filter !== "filtered" || reasonFilter === null || (row.skip_reason ?? "") === reasonFilter) && matchesSearch(row, search)
+    (row) => matchesFilter(row, filter2) && (filter2 !== "filtered" || reasonFilter === null || (row.skip_reason ?? "") === reasonFilter) && matchesSearch(row, search2)
   );
   patchList(visible);
   if (!visible.length) {
@@ -6885,7 +7123,7 @@ async function refresh() {
       }
     }
     setRows([...merged.values()]);
-    paint();
+    paint2();
     if (!business) {
       empty.hidden = false;
       document.querySelector("#log-empty-title").textContent = "Not logged in";
@@ -6906,21 +7144,21 @@ function scheduleRefresh(delayMs = 150) {
   window.clearTimeout(refreshTimer);
   refreshTimer = window.setTimeout(() => void refresh(), delayMs);
 }
-for (const button of document.querySelectorAll(".log-filter")) {
+for (const button of document.querySelectorAll(".log-filter[data-filter]")) {
   button.addEventListener("click", () => {
-    filter = button.dataset.filter ?? "all";
+    filter2 = button.dataset.filter ?? "all";
     reasonFilter = null;
-    for (const other of document.querySelectorAll(".log-filter")) {
+    for (const other of document.querySelectorAll(".log-filter[data-filter]")) {
       const active = other === button;
       other.classList.toggle("active", active);
       other.setAttribute("aria-pressed", String(active));
     }
-    paint();
+    paint2();
   });
 }
 document.querySelector("#log-search").addEventListener("input", (event) => {
-  search = event.target.value;
-  paint();
+  search2 = event.target.value;
+  paint2();
 });
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === "local" && REFRESH_KEYS.some((key) => key in changes)) {
@@ -6955,3 +7193,4 @@ chrome.storage.onChanged.addListener((changes, area) => {
     paintSafetyBrake(changes[SAFETY_BRAKE_STORAGE_KEY].newValue);
   }
 });
+initRankView();

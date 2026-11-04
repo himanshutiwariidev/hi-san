@@ -11,10 +11,10 @@
       <header class="popup-header">
         <div class="popup-brand">
           <div class="brand-left">
-            <img class="brand-mark" src="icons/hisan-mark.svg" alt="Hi-San Bot" width="34" height="34" />
+            <img class="brand-mark" src="icons/hisan-mark.svg" alt="" width="34" height="34" />
             <div class="brand-text">
               <h1>Hi-San Bot</h1>
-              <span id="app-version">v1.0.8</span>
+              <span id="app-version">v1.0.14</span>
             </div>
           </div>
           <div class="header-account" id="header-account" hidden>
@@ -78,7 +78,7 @@
         <section id="app-panel" hidden>
           <nav class="tabs" aria-label="Extension sections">
             <button class="tab-button active" type="button" data-tab="config" aria-selected="true">Config</button>
-            <button class="tab-button" type="button" data-tab="rank" aria-selected="false">Lead Rank</button>
+            <button class="tab-button" type="button" data-tab="rank" aria-selected="false">Lead Rank <span class="beta-badge">Beta</span></button>
           </nav>
           <section class="tab-panel" id="tab-config">
             <section class="setting-group" aria-labelledby="targeting-title">
@@ -152,8 +152,8 @@
 
             <section class="setting-group" aria-labelledby="capture-title">
               <h2 id="capture-title">Capture</h2>
-              <label class="field-label" for="daily-capture-limit">Daily capture limit <span class="field-hint">(1–10)</span></label>
-              <input id="daily-capture-limit" type="number" min="1" max="10" step="1" value="10" />
+              <label class="field-label" for="daily-capture-limit">Daily capture limit <span class="field-hint" id="daily-capture-limit-hint">(1–11)</span></label>
+              <input id="daily-capture-limit" type="number" min="1" max="11" step="1" value="11" />
             </section>
 
             <button id="save-sync" type="button">Save &amp; Sync</button>
@@ -180,10 +180,30 @@
             <span id="business">Not bound</span>
           </div>
           <section class="tab-panel" id="tab-rank" hidden>
-            <div class="empty-panel">
-              <strong>Lead Rank</strong>
-              <p>Lead ranking will appear here after scoring rules are connected.</p>
-            </div>
+            <section class="setting-group" aria-labelledby="interest-title">
+              <div class="rank-head">
+                <div>
+                  <h2 id="interest-title">Expired Lead Interest <span class="beta-badge">Beta</span></h2>
+                  <p class="rank-help">Ranks expired leads on your keywords and countries and sends “I am Interested” on every rank A lead.</p>
+                </div>
+                <button id="interest-toggle" class="stopped" type="button">Start</button>
+              </div>
+              <p id="interest-status" class="rank-status">Stopped</p>
+              <div class="rank-stats">
+                <div><em id="interest-today">0</em><span>Interested today</span></div>
+                <div><em id="interest-total">0</em><span>Interested total</span></div>
+              </div>
+              <p id="interest-scan" class="rank-scan">No scan yet</p>
+              <p id="interest-error" class="rank-error" hidden></p>
+            </section>
+            <section class="setting-group" aria-labelledby="interest-log-title">
+              <div class="rank-head">
+                <h2 id="interest-log-title">Latest Rank A Leads</h2>
+                <button id="interest-open-panel" class="link-button" type="button">Activity panel →</button>
+              </div>
+              <ol id="interest-log" class="rank-log"></ol>
+              <p id="interest-log-empty" class="rank-empty">No rank A leads yet.</p>
+            </section>
           </section>
         </section>
       </div>

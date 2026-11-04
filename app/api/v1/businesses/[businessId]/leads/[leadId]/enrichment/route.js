@@ -10,13 +10,30 @@ export const PATCH = route(async (request, { businessId, leadId }) => {
   const body = await readJson(request);
 
   // leadId can be our backend ID or a client_event_id
+  const cleanId = String(leadId).trim();
+  const rawEventId = cleanId.includes(":") ? cleanId.slice(cleanId.indexOf(":") + 1) : cleanId;
+
   const lead = db
-    .prepare("SELECT * FROM leads WHERE business_id = ? AND (id = ? OR client_event_id = ? OR external_id = ?)")
-    .get(business.id, leadId, leadId, leadId.replace(/^im-ofr:/, ""));
+    .prepare(
+      "SELECT * FROM leads WHERE business_id = ? AND (id = ? OR client_event_id = ? OR client_event_id = ? OR external_id = ?)"
+    )
+    .get(business.id, cleanId, cleanId, rawEventId, rawEventId.replace(/^im-ofr:/, ""));
 
   if (!lead) throw notFound("Lead not found.");
 
   const str = (v, max = 250) => (v ? String(v).trim().slice(0, max) : null);
+  const buyer = (body.buyer && typeof body.buyer === "object") ? body.buyer : body;
+
+  const buyerName = str(buyer.name ?? buyer.buyer_name ?? body.name ?? body.buyer_name);
+  const company = str(buyer.company ?? body.company);
+  const phone = str(buyer.phone ?? body.phone, 50);
+  const email = str(buyer.email ?? body.email);
+  const address = str(buyer.address ?? body.address, 500);
+  const city = str(buyer.city ?? body.city, 100);
+  const state = str(buyer.state ?? body.state, 100);
+  const country = str(buyer.country ?? body.country, 100);
+  const purchaseId = str(body.purchase_id ?? body.purchaseId, 100);
+  const creditBalance = str(body.credit_balance ?? body.creditBalance, 100);
 
   db.prepare(
     `UPDATE leads SET
@@ -36,17 +53,17 @@ export const PATCH = route(async (request, { businessId, leadId }) => {
       retrieved_at = COALESCE(retrieved_at, ?)
      WHERE id = ?`
   ).run(
-    str(body.buyer_name ?? body.name),
-    str(body.company),
-    str(body.phone, 50),
-    str(body.email),
-    str(body.address, 500),
-    str(body.city, 100),
-    str(body.state, 100),
-    str(body.country, 100),
-    str(body.purchase_id ?? body.purchaseId, 100),
-    str(body.credit_balance ?? body.creditBalance, 100),
-    body.has_whatsapp ? 1 : 0,
+    buyerName,
+    company,
+    phone,
+    email,
+    address,
+    city,
+    state,
+    country,
+    purchaseId,
+    creditBalance,
+    body.has_whatsapp ? 1 : (phone ? 1 : 0),
     now(),
     lead.id
   );
@@ -54,7 +71,7 @@ export const PATCH = route(async (request, { businessId, leadId }) => {
   db.prepare("INSERT INTO lead_logs (lead_id, at, message) VALUES (?, ?, ?)").run(
     lead.id,
     now(),
-    "Buyer contact details enriched from IndiaMART purchase response"
+    `Buyer contact details enriched: ${phone || "no phone"} - ${email || "no email"}`
   );
 
   const updated = db.prepare("SELECT * FROM leads WHERE id = ?").get(lead.id);
@@ -62,4 +79,3 @@ export const PATCH = route(async (request, { businessId, leadId }) => {
 
   return Response.json(leadOut(updated));
 });
-

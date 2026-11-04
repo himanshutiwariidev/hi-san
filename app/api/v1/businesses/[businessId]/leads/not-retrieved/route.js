@@ -8,12 +8,15 @@ export const POST = route(async (request, { businessId }) => {
   const body = await readJson(request);
 
   const clientEventId = String(body.client_event_id ?? "").trim();
+  const rawEventId = clientEventId.includes(":") ? clientEventId.slice(clientEventId.indexOf(":") + 1) : clientEventId;
   const errorMsg = String(body.error ?? "Purchase failed").slice(0, 300);
 
   if (clientEventId) {
     const lead = db
-      .prepare("SELECT * FROM leads WHERE business_id = ? AND (client_event_id = ? OR external_id = ?)")
-      .get(business.id, clientEventId, clientEventId.replace(/^im-ofr:/, ""));
+      .prepare(
+        "SELECT * FROM leads WHERE business_id = ? AND (client_event_id = ? OR client_event_id = ? OR external_id = ?)"
+      )
+      .get(business.id, clientEventId, rawEventId, rawEventId.replace(/^im-ofr:/, ""));
 
     if (lead) {
       db.prepare("UPDATE leads SET status = 'not_retrieved', filter_reason = ? WHERE id = ?").run(errorMsg, lead.id);
@@ -23,4 +26,3 @@ export const POST = route(async (request, { businessId }) => {
 
   return Response.json({ ok: true });
 });
-

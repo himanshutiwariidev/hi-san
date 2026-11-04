@@ -1,4 +1,4 @@
-import { db, now } from "@/lib/server/db";
+import { db } from "@/lib/server/db";
 import { requireBusiness, requireUser } from "@/lib/server/auth";
 import { route } from "@/lib/server/http";
 import { parseFilterSettings } from "@/lib/server/serializers";
@@ -57,6 +57,7 @@ export const GET = route(async (_request, { businessId }) => {
     },
     settings: {
       daily_capture_limit: settings.daily_capture_limit ?? settings.daily_limit ?? 10,
+      max_daily_capture_limit: 50,
       daily_limit: settings.daily_limit ?? 10,
       auto_buy: Boolean(settings.auto_buy),
       allowed_countries: settings.allowed_countries ?? [],
@@ -82,4 +83,3 @@ export const GET = route(async (_request, { businessId }) => {
     keyword_rules: keywordRules,
   });
 });
-

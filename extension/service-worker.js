@@ -6288,6 +6288,35 @@ function localBotState(botEnabled, poll, now = Date.now()) {
 // src/config.ts
 var API_BASE_URL = "https://hi-san.medishipper.com/api";
 
+// src/indiamart-api-adapter.ts
+var IST_OFFSET_MS = 5.5 * 60 * 60 * 1e3;
+var SERVER_TEXT_LIMITS = {
+  title: 500,
+  country: 120,
+  category: 300,
+  unit: 40,
+  purpose: 240,
+  country_iso: 8,
+  state: 120,
+  description: 4e3,
+  source_url: 1e3,
+  visible_text: 1e4
+};
+var MAX_SERVER_QUANTITY = 999999999;
+function fitLeadToServerLimits(lead) {
+  const fitted = { ...lead };
+  for (const [field, limit] of Object.entries(SERVER_TEXT_LIMITS)) {
+    const value = fitted[field];
+    if (typeof value === "string" && value.length > limit) {
+      fitted[field] = value.slice(0, limit);
+    }
+  }
+  if (typeof fitted.quantity === "number" && fitted.quantity > MAX_SERVER_QUANTITY) {
+    fitted.quantity = null;
+  }
+  return fitted;
+}
+
 // ../../node_modules/dexie/import-wrapper.mjs
 var import_dexie = __toESM(require_dexie(), 1);
 var DexieSymbol = /* @__PURE__ */ Symbol.for("Dexie");
@@ -6695,47 +6724,70 @@ function buildEnrichmentId(businessId, clientEventId) {
 }
 async function enqueueLeadEnrichment(db, input, now = (/* @__PURE__ */ new Date()).toISOString()) {
   const enrichmentId = buildEnrichmentId(input.business_id, input.client_event_id);
-  const existing = await db.enrichments.get(enrichmentId);
-  if (existing?.state === "ACKED") {
-    return existing;
-  }
-  const activity = await db.activity.get(enrichmentId);
-  const restored = activity?.not_retrieved_sync ? { decision: "captured", skip_reason: null, not_retrieved_sync: void 0 } : {};
-  await updateActivity(db, enrichmentId, {
-    ...restored,
-    contact_state: "PENDING",
-    contact_error: null,
-    buyer_name: input.payload.buyer_name ?? null,
-    buyer_phone: input.payload.buyer_phone ?? null,
-    buyer_email: input.payload.buyer_email ?? null,
-    contact_source_url: input.payload.source_url || null,
-    updated_at: now
-  });
-  const backendLeadId = input.backend_lead_id ?? existing?.backend_lead_id ?? null;
-  if (existing) {
-    const changes = {
-      payload: input.payload,
+  return db.transaction("rw", db.enrichments, db.activity, db.sentKeys, async () => {
+    const existing = await db.enrichments.get(enrichmentId);
+    if (existing?.state === "ACKED") {
+      return existing;
+    }
+    const activity = await db.activity.get(enrichmentId);
+    const restored = activity?.not_retrieved_sync ? { decision: "captured", skip_reason: null, not_retrieved_sync: void 0 } : {};
+    await updateActivity(db, enrichmentId, {
+      ...restored,
+      contact_state: "PENDING",
+      contact_error: null,
+      buyer_name: input.payload.buyer_name ?? null,
+      buyer_phone: input.payload.buyer_phone ?? null,
+      buyer_email: input.payload.buyer_email ?? null,
+      contact_source_url: input.payload.source_url || null,
+      updated_at: now
+    });
+    const backendLeadId = input.backend_lead_id ?? existing?.backend_lead_id ?? (await db.sentKeys.get(enrichmentId))?.backend_lead_id ?? activity?.backend_lead_id ?? null;
+    if (existing) {
+      const changes = {
+        payload: input.payload,
+        backend_lead_id: backendLeadId,
+        state: "PENDING",
+        updated_at: now,
+        last_error: void 0
+      };
+      await db.enrichments.update(enrichmentId, changes);
+      return { ...existing, ...changes };
+    }
+    const record = {
+      enrichment_id: enrichmentId,
+      business_id: input.business_id,
       backend_lead_id: backendLeadId,
+      client_event_id: input.client_event_id,
+      payload: input.payload,
       state: "PENDING",
+      created_at: now,
       updated_at: now,
-      last_error: void 0
+      attempt_count: 0
     };
-    await db.enrichments.update(enrichmentId, changes);
-    return { ...existing, ...changes };
-  }
-  const record = {
-    enrichment_id: enrichmentId,
-    business_id: input.business_id,
-    backend_lead_id: backendLeadId,
-    client_event_id: input.client_event_id,
-    payload: input.payload,
-    state: "PENDING",
-    created_at: now,
-    updated_at: now,
-    attempt_count: 0
-  };
-  await db.enrichments.put(record);
-  return record;
+    await db.enrichments.put(record);
+    return record;
+  });
+}
+async function attachKnownBackendLeadIds(db, businessId) {
+  return db.transaction("rw", db.enrichments, db.sentKeys, db.activity, async () => {
+    const waiting = (await db.enrichments.where("business_id").equals(businessId).toArray()).filter(
+      (record) => !record.backend_lead_id && record.state !== "ACKED"
+    );
+    if (!waiting.length) {
+      return 0;
+    }
+    const ids = waiting.map((record) => record.enrichment_id);
+    const [sentKeys, activity] = await Promise.all([db.sentKeys.bulkGet(ids), db.activity.bulkGet(ids)]);
+    let attached = 0;
+    for (const [index, record] of waiting.entries()) {
+      const leadId = sentKeys[index]?.backend_lead_id ?? activity[index]?.backend_lead_id;
+      if (leadId) {
+        await db.enrichments.update(record.enrichment_id, { backend_lead_id: leadId });
+        attached += 1;
+      }
+    }
+    return attached;
+  });
 }
 async function attachBackendLeadIds(db, businessId, leads) {
   if (!leads.length) {
@@ -7255,9 +7307,13 @@ async function sendLeadRecords(clientEventIds) {
 }
 async function sendLeadBatch(clientEventIds) {
   const state = await chrome.storage.local.get(["authSession", "selectedBusinessId", "billingEntitlement", "businesses"]);
-  if (!billingAllows(state) && !await refreshBillingAccess()) return;
+  if (!billingAllows(state) && !await refreshBillingAccess()) {
+    await chrome.storage.local.set({ lastSyncError: "Leads waiting: plan access is not confirmed." });
+    return;
+  }
   const authSession = state.authSession?.access_token ? state.authSession : null;
   if (!authSession) {
+    await chrome.storage.local.set({ lastSyncError: "Leads waiting: signed out." });
     return;
   }
   const selectedBusiness = selectedBusinessFrom(state, authSession);
@@ -7275,6 +7331,18 @@ async function sendLeadBatch(clientEventIds) {
       },
       body: JSON.stringify({ leads: claimed.map((record) => record.event) })
     });
+    if (response.status === 422 && claimed.length > 1) {
+      await Promise.all(claimed.map((record) => transitionEvent(outboxDb, record.client_event_id, "RETRY", "Sending again on its own")));
+      void Promise.all(claimed.map((record) => runIngest(() => sendLeadBatch([record.client_event_id]))));
+      return;
+    }
+    if (response.status === 422) {
+      const detail = (await response.text().catch(() => "")).slice(0, 300);
+      const message = `Rejected by the server: ${detail || "invalid lead"}`;
+      await transitionEvent(outboxDb, claimed[0].client_event_id, "DEAD", message);
+      await chrome.storage.local.set({ lastSyncAttemptAt: (/* @__PURE__ */ new Date()).toISOString(), lastSyncError: message });
+      return;
+    }
     if (!response.ok) {
       throw new Error(`Sync failed with ${response.status}`);
     }
@@ -7338,6 +7406,7 @@ async function syncPendingLeadEnrichmentsOnce() {
     return;
   }
   const selectedBusiness = await readSelectedBusiness(authSession);
+  await attachKnownBackendLeadIds(outboxDb, selectedBusiness.id);
   const pending = (await outboxDb.enrichments.where("state").anyOf(["PENDING", "RETRY", "SENDING"]).toArray()).filter((record) => record.business_id === selectedBusiness.id && isClaimableEnrichment(record, STALE_SENDING_MS)).slice(0, 25);
   if (!pending.length) {
     return;
@@ -7382,7 +7451,11 @@ async function syncNotRetrievedLeads() {
       return;
     }
     const selectedBusiness = await readSelectedBusiness(authSession);
-    const pending = (await listPendingNotRetrieved(outboxDb, selectedBusiness.id)).slice(0, 25);
+    const waiting = await listPendingNotRetrieved(outboxDb, selectedBusiness.id);
+    await Promise.all(
+      waiting.filter((row) => row.sync_state === "DEAD").map((row) => markNotRetrievedSynced(outboxDb, row.client_event_id))
+    );
+    const pending = waiting.filter((row) => row.sync_state === "ACKED").slice(0, 25);
     let freed = false;
     for (const row of pending) {
       const response = await fetch(`${API_BASE_URL}/v1/businesses/${selectedBusiness.id}/leads/not-retrieved`, {
@@ -7414,7 +7487,7 @@ async function storeCapturedLeads(businessId, leads, sourceTabId) {
   }
   const records = await enqueueEvents(
     outboxDb,
-    leads.map((lead) => ({ ...lead, client_event_id: `${businessIdNow}:${lead.client_event_id}` })),
+    leads.map((lead) => ({ ...fitLeadToServerLimits(lead), client_event_id: `${businessIdNow}:${lead.client_event_id}` })),
     businessIdNow,
     void 0,
     sourceTabId

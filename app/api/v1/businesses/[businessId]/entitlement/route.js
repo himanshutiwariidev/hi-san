@@ -5,22 +5,28 @@ export const GET = route(async (_request, { businessId }) => {
   const user = await requireUser();
   const business = requireBusiness(user, businessId);
 
-  // Parse custom entitlement if saved in DB, or grant default full operational access
   let ent = {};
   try {
     ent = JSON.parse(business.entitlement || "{}");
   } catch {}
 
   const now = Date.now();
-  const endsAt = ent.ends_at ?? (now + 365 * 24 * 60 * 60 * 1000); // 1 year default
+  const checkedAt = new Date(now).toISOString();
+  const coverageEndsAt = ent.coverage_ends_at ?? new Date(now + 365 * 24 * 60 * 60 * 1000).toISOString();
+  const paidEndsAt = ent.paid_coverage_ends_at ?? coverageEndsAt;
 
   return Response.json({
     business_id: business.id,
-    operational_access: ent.operational_access !== undefined ? Boolean(ent.operational_access) : true,
-    ends_at: endsAt,
+    business_status: "active",
+    billing_state: "active",
+    operational_access: true,
     plan_name: ent.plan_name ?? "Pro Unlimited",
+    plan_price_paise: 0,
     daily_lead_limit: ent.daily_lead_limit ?? 500,
-    received_at: now,
+    checked_at: checkedAt,
+    received_at: checkedAt,
+    coverage_ends_at: coverageEndsAt,
+    paid_coverage_ends_at: paidEndsAt,
+    trial_ends_at: null,
   });
 });
-

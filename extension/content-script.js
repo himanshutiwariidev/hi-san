@@ -25,24 +25,7 @@
   }
 
   // ../../packages/schemas/dist/index.js
-  var HARD_DAILY_CAPTURE_LIMIT = 11;
-  var FILTER_CHECK_ORDER = [
-    { title: "Readable lead", detail: "Leads without a real title are skipped." },
-    { title: "Lead age", detail: "Older than Max lead age is skipped." },
-    { title: "Country", detail: "Must be one of the allowed countries (if any are set)." },
-    { title: "Indian state", detail: "Leads from India must come from an allowed state (if any are set)." },
-    {
-      title: "Contact",
-      detail: 'Email setting, then Phone setting, then Any Contact decides how they combine. With "Trusted buyers skip contact filter" on, a buyer on IndiaMART 1+ years with any email or phone shown or verified passes this check; every other check still applies.'
-    },
-    { title: "GST verified", detail: 'Only when "Only GST-verified buyers" is on.' },
-    { title: "Buyer membership", detail: "Buyer must be on IndiaMART for at least the minimum months." },
-    { title: "Category", detail: "Blocked categories are skipped; with an allow list, the category must be on it." },
-    { title: "Excluded keywords", detail: "Any excluded keyword in the title skips the lead." },
-    { title: "Keyword match", detail: "A keyword must match the title, with its own country, state, unit and minimum quantity." },
-    { title: "Retail", detail: "Below the retail quantity, or marked Retail by IndiaMART when retail leads are off." },
-    { title: "Daily limits", detail: `Each keyword's limit, then the business limit (never above ${HARD_DAILY_CAPTURE_LIMIT} a day).` }
-  ];
+  var DEFAULT_DAILY_CAPTURE_LIMIT = 11;
   function normalizeChannelContactMode(value) {
     if (value === "available") {
       return "available";
@@ -434,8 +417,9 @@
     }
     if (matchedPositive.length) {
       const threshold = settings.retail_quantity_threshold;
-      const retailBySize = threshold != null && lead.quantity != null && Number(lead.quantity) < Number(threshold);
-      const retailByFlag = settings.include_retail_leads === false && lead.is_retail_flagged === true;
+      const excludeRetail = settings.include_retail_leads === false;
+      const retailBySize = excludeRetail && threshold != null && lead.quantity != null && Number(lead.quantity) < Number(threshold);
+      const retailByFlag = excludeRetail && lead.is_retail_flagged === true;
       if (retailBySize || retailByFlag) {
         return { decision: "skipped", skip_reason: "retail_lead", matched_positive_rule_ids: matchedPositive };
       }
@@ -445,8 +429,41 @@
     const reason = ["keyword_country_mismatch", "keyword_state_mismatch", "unit_mismatch", "quantity_below_minimum"].find((candidate) => mismatches.has(candidate));
     return skipped(reason ?? "no_positive_keyword_match");
   }
-  function effectiveDailyLimit(limit) {
-    return Math.min(limit ?? HARD_DAILY_CAPTURE_LIMIT, HARD_DAILY_CAPTURE_LIMIT);
+  function rankExpiredLead(lead, config) {
+    const { settings } = config;
+    if (isInvalidLeadTitle(lead.title)) {
+      return { rank: "C", matched_positive_rule_ids: [], reason: "invalid_title" };
+    }
+    const normalizedTitle = normalizeText(lead.title);
+    const rules = compiledRules(config);
+    const negativeText = settings.negative_keyword_full_text === true ? negativeSearchText(lead) : normalizedTitle;
+    if (rules.some((rule) => rule.type === "negative" && rule.matches(negativeText))) {
+      return { rank: "C", matched_positive_rule_ids: [], reason: "negative_keyword_match" };
+    }
+    const positives = rules.filter((rule) => rule.type === "positive" && rule.matches(normalizedTitle));
+    if (!positives.length) {
+      return { rank: "C", matched_positive_rule_ids: [], reason: "no_positive_keyword_match" };
+    }
+    const indianLead = isIndianLead(lead);
+    const allowedCountries = settings.allowed_countries.map(normalizeText).filter(Boolean);
+    const allowedStates = (settings.allowed_states ?? []).filter((state) => normalizeText(state));
+    const keywordIds = positives.map((rule) => rule.id);
+    if (allowedCountries.length && !countryAllowed(lead.country, allowedCountries, lead.country_iso)) {
+      return { rank: "B", matched_positive_rule_ids: keywordIds, reason: "country_not_allowed" };
+    }
+    if (allowedStates.length && indianLead && !stateAllowed(lead, allowedStates)) {
+      return { rank: "B", matched_positive_rule_ids: keywordIds, reason: "state_not_allowed" };
+    }
+    const located = positives.filter(
+      (rule) => (!rule.allowedCountries.length || countryAllowed(lead.country, rule.allowedCountries, lead.country_iso)) && (!rule.allowedStates.length || !indianLead || stateAllowed(lead, rule.allowedStates))
+    );
+    if (!located.length) {
+      return { rank: "B", matched_positive_rule_ids: keywordIds, reason: "keyword_country_mismatch" };
+    }
+    return { rank: "A", matched_positive_rule_ids: located.map((rule) => rule.id), reason: "matched" };
+  }
+  function effectiveDailyLimit(limit, cap) {
+    return Math.min(limit ?? cap, cap);
   }
   function utcDateString(now = Date.now()) {
     return new Date(now).toISOString().slice(0, 10);
@@ -460,15 +477,16 @@
     if (classification.decision !== "captured") {
       return result;
     }
-    const limits = new Map(compiledRules(config).map((rule) => [rule.id, effectiveDailyLimit(rule.maxLeadsPerDay)]));
+    const cap = config.settings.max_daily_capture_limit ?? DEFAULT_DAILY_CAPTURE_LIMIT;
+    const limits = new Map(compiledRules(config).map((rule) => [rule.id, effectiveDailyLimit(rule.maxLeadsPerDay, cap)]));
     const withRoom = classification.matched_positive_rule_ids.filter((ruleId) => {
-      const limit = limits.get(ruleId) ?? HARD_DAILY_CAPTURE_LIMIT;
+      const limit = limits.get(ruleId) ?? cap;
       return (counters.keyword[ruleId] ?? 0) < limit;
     });
     if (!withRoom.length) {
       return { ...result, decision: "skipped", skip_reason: "keyword_daily_limit_reached" };
     }
-    if (counters.captured >= effectiveDailyLimit(config.settings.daily_capture_limit)) {
+    if (counters.captured >= effectiveDailyLimit(config.settings.daily_capture_limit, cap)) {
       return { ...result, decision: "skipped", skip_reason: "daily_limit_reached" };
     }
     return { ...result, matched_positive_rule_ids: withRoom };
@@ -488,131 +506,6 @@
       }
     }
     return counters;
-  }
-
-  // src/country-iso.ts
-  var RETIRED_CODES = /* @__PURE__ */ new Set(["AN", "BU", "CS", "DD", "DY", "EU", "EZ", "FX", "HV", "NH", "NT", "QO", "RH", "SU", "TP", "UN", "VD", "XA", "XB", "XK", "YD", "YU", "ZR", "ZZ"]);
-  var EXTRA_NAMES = {
-    usa: "US",
-    us: "US",
-    "u s a": "US",
-    america: "US",
-    "united states of america": "US",
-    uk: "UK",
-    gb: "UK",
-    britain: "UK",
-    "great britain": "UK",
-    england: "UK",
-    uae: "AE",
-    emirates: "AE",
-    "czech republic": "CZ",
-    "ivory coast": "CI",
-    "cote d ivoire": "CI",
-    burma: "MM",
-    myanmar: "MM",
-    "hong kong": "HK",
-    palestine: "PS",
-    congo: "CG",
-    "republic of the congo": "CG",
-    "democratic republic of the congo": "CD",
-    "holy see": "VA",
-    vatican: "VA",
-    "cabo verde": "CV",
-    turkey: "TR",
-    "east timor": "TL",
-    "timor leste": "TL",
-    korea: "KR",
-    "south korea": "KR"
-  };
-  function normalizeCountry(value) {
-    return value.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/&/g, " and ").replace(/[^a-z0-9]+/g, " ").trim();
-  }
-  var namesToCodes = null;
-  function countryCodes() {
-    if (namesToCodes) {
-      return namesToCodes;
-    }
-    const codes = /* @__PURE__ */ new Map();
-    try {
-      const names = new Intl.DisplayNames(["en"], { type: "region" });
-      for (let first = 65; first <= 90; first += 1) {
-        for (let second = 65; second <= 90; second += 1) {
-          const code = String.fromCharCode(first, second);
-          const name = RETIRED_CODES.has(code) ? void 0 : names.of(code);
-          if (name && name !== code) {
-            codes.set(normalizeCountry(name), code === "GB" ? "UK" : code);
-          }
-        }
-      }
-    } catch {
-    }
-    for (const [name, code] of Object.entries(EXTRA_NAMES)) {
-      codes.set(name, code);
-    }
-    namesToCodes = codes;
-    return codes;
-  }
-  function countryIso(country) {
-    const normalized = normalizeCountry(country);
-    if (!normalized) {
-      return null;
-    }
-    const known = countryCodes().get(normalized);
-    if (known) {
-      return known;
-    }
-    const code = normalized.toUpperCase();
-    return /^[A-Z]{2}$/.test(code) && [...countryCodes().values()].includes(code) ? code : null;
-  }
-  var isoFilterCache = /* @__PURE__ */ new WeakMap();
-  function leadListIsoFilter(config) {
-    if (isoFilterCache.has(config)) {
-      return isoFilterCache.get(config) ?? null;
-    }
-    const result = computeIsoFilter(config);
-    isoFilterCache.set(config, result);
-    return result;
-  }
-  function computeIsoFilter(config) {
-    let countries = config.settings.allowed_countries.filter((country) => country.trim());
-    if (!countries.length) {
-      const positives = config.keyword_rules.filter((rule) => rule.type === "positive");
-      if (!positives.length || positives.some((rule) => !(rule.allowed_countries ?? []).some((country) => country.trim()))) {
-        return null;
-      }
-      countries = positives.flatMap((rule) => rule.allowed_countries ?? []);
-    }
-    const codes = /* @__PURE__ */ new Set();
-    for (const country of countries) {
-      const code = countryIso(country);
-      if (!code || code === "IN") {
-        return null;
-      }
-      codes.add(code);
-    }
-    return [...codes].sort();
-  }
-  function leadListIsoFilterGap(config) {
-    if (leadListIsoFilter(config)) {
-      return null;
-    }
-    const countries = config.settings.allowed_countries.filter((country) => country.trim());
-    if (!countries.length) {
-      return "no country filter: every country can be captured";
-    }
-    const unknown = countries.find((country) => !countryIso(country));
-    if (unknown) {
-      return `country not recognised: ${unknown}`;
-    }
-    return "India is allowed: Indian leads are listed by state, not country";
-  }
-  function shuffledIsoParam(codes, random = Math.random) {
-    const shuffled = codes.slice();
-    for (let index = shuffled.length - 1; index > 0; index -= 1) {
-      const other = Math.floor(random() * (index + 1));
-      [shuffled[index], shuffled[other]] = [shuffled[other], shuffled[index]];
-    }
-    return shuffled.join(",");
   }
 
   // src/fast-buy.ts
@@ -701,15 +594,48 @@
   function plainMessage(value) {
     return value.replace(/<br\s*\/?>/gi, " ").replace(/<[^>]*>/g, "").replace(/&nbsp;/gi, " ").replace(/&amp;/gi, "&").replace(/&lt;/gi, "<").replace(/&gt;/gi, ">").replace(/\s+/g, " ").trim();
   }
+  function firstText(row, keys) {
+    for (const key of keys) {
+      const value = text(row[key]);
+      if (value) {
+        return value;
+      }
+    }
+    return null;
+  }
+  var MOBILE_KEYS = ["GLUSR_USR_PH_MOBILE", "GLUSR_USR_PH_MOBILE_ALT", "GLUSR_USR_PH_NUMBER", "GLUSR_USR_PH2_NUMBER"];
+  var EMAIL_KEYS = ["GLUSR_USR_EMAIL", "GLUSR_USR_EMAIL_ALT", "GLUSR_EMAIL"];
+  var NAME_KEYS = ["GLUSR_NAME", "GLUSR_USR_NAME", "GLUSR_FIRSTNAME"];
   function buyerPhone(row) {
-    const parts = [row.GLUSR_USR_PH_COUNTRY, row.GLUSR_USR_PH_MOBILE].map(text).filter((part) => Boolean(part));
-    const digits = parts.join("").replace(/\D/g, "");
-    if (!row.GLUSR_USR_PH_MOBILE || digits.length < 7) {
+    const mobile = firstText(row, MOBILE_KEYS);
+    const country = text(row.GLUSR_USR_PH_COUNTRY);
+    const digits = [country, mobile].filter(Boolean).join("").replace(/\D/g, "");
+    if (!mobile || digits.length < 7) {
       return null;
     }
-    const country = text(row.GLUSR_USR_PH_COUNTRY);
-    const mobile = text(row.GLUSR_USR_PH_MOBILE);
-    return country && mobile && !mobile.startsWith("+") ? `+${country.replace(/^\+/, "")} ${mobile}` : mobile;
+    return country && !mobile.startsWith("+") ? `+${country.replace(/^\+/, "")} ${mobile}` : mobile;
+  }
+  function isRow(value) {
+    return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+  }
+  function hasBuyerFields(row) {
+    return Object.keys(row).some((key) => key.startsWith("GLUSR_"));
+  }
+  function buyerRow(data) {
+    if (isRow(data)) {
+      return hasBuyerFields(data) ? data : null;
+    }
+    if (!Array.isArray(data)) {
+      return null;
+    }
+    return data.find((row) => isRow(row) && hasBuyerFields(row)) ?? (isRow(data[0]) ? data[0] : null);
+  }
+  function rawAnswer(json) {
+    try {
+      return (JSON.stringify(json) ?? "").slice(0, 300);
+    } catch {
+      return "";
+    }
   }
   var ACTIVITY_WARNING_PATTERN = /\b(unusual|high|suspicious|abnormal|excessive)\s+(activity|traffic|usage)\b|too\s+many\s+requests|activity\s+(has\s+been\s+)?(detected|flagged)|temporarily\s+(blocked|restricted|suspended)/i;
   function looksLikeActivityWarning(text3) {
@@ -727,25 +653,29 @@
     if (String(json.Flag ?? "") === "7") {
       return { kind: "lost", message: message || "expired or bought by another seller" };
     }
-    const success = String(json.Status ?? "").toLowerCase() === "success" || String(json.Flag ?? "") === "1";
-    const data = Array.isArray(json.Data) ? json.Data : [];
-    const buyer = data[0] && typeof data[0] === "object" ? data[0] : null;
-    if (!result.ok || !success || !buyer) {
+    const statusSuccess = String(json.Status ?? "").toLowerCase() === "success";
+    const flagSuccess = String(json.Flag ?? "") === "1";
+    const buyer = buyerRow(json.Data);
+    if (!result.ok || !(statusSuccess || flagSuccess) || !buyer) {
       if (looksLikeActivityWarning(message)) {
         return { kind: "rate_limited", retryAfterSeconds: result.retryAfterSeconds ?? DEFAULT_BUY_RATE_LIMIT_COOLDOWN_SECONDS };
       }
+      if (result.ok && statusSuccess && flagSuccess) {
+        return { kind: "bought_no_details", message: message || "no buyer details in the answer", raw: rawAnswer(json) };
+      }
       return { kind: "failed", message: message || `HTTP ${result.status}` };
     }
-    const balance = data[1] && typeof data[1] === "object" ? data[1] : null;
+    const balance = Array.isArray(json.Data) ? json.Data.find((row) => isRow(row) && "creditBalance" in row) : null;
     return {
       kind: "bought",
       purchaseId: text(json.pur_id) ?? "",
-      creditBalance: text(balance?.creditBalance),
+      creditBalance: isRow(balance) ? text(balance.creditBalance) : null,
+      raw: rawAnswer(json),
       buyer: {
-        name: text(buyer.GLUSR_NAME),
+        name: firstText(buyer, NAME_KEYS),
         company: text(buyer.GLUSR_COMPANY),
         phone: buyerPhone(buyer),
-        email: text(buyer.GLUSR_USR_EMAIL),
+        email: firstText(buyer, EMAIL_KEYS),
         address: text(buyer.GLUSR_ADDRESS),
         city: text(buyer.GLUSR_CITY),
         state: text(buyer.GLUSR_STATE),
@@ -892,6 +822,92 @@
     );
   }
 
+  // src/expired-interest.ts
+  function buildMarkShortlistPayload(glid, target) {
+    return {
+      glusrid: glid,
+      mcatid: target.mcatId ?? "",
+      ofrid: target.offerId,
+      flag_val: "I",
+      status: 1,
+      is_expire: 1,
+      source: "EXPIRED_BL_SECTION"
+    };
+  }
+  function parseMarkShortlistResult(result) {
+    if (result.status === 429) {
+      return { kind: "rate_limited", retryAfterSeconds: result.retryAfterSeconds };
+    }
+    const json = result.json ?? null;
+    const code = String(json?.CODE ?? "");
+    const status = String(json?.STATUS ?? "").toUpperCase();
+    const message = String(json?.MESSAGE ?? "").trim();
+    if (result.ok && code === "200" && (status === "SUCCESSFUL" || status === "SUCCESS")) {
+      return /already/i.test(message) ? { kind: "already" } : { kind: "ok" };
+    }
+    if (/already/i.test(message)) {
+      return { kind: "already" };
+    }
+    if (!json || typeof json !== "object" || !("CODE" in json || "STATUS" in json) || result.status === 0 || result.status >= 500) {
+      return { kind: "retry", message: result.error || (result.status ? `HTTP ${result.status}` : "no answer") };
+    }
+    return { kind: "failed", message: message || result.error || (result.status ? `HTTP ${result.status}` : "no answer") };
+  }
+  var EXPIRED_INTEREST_ENABLED_KEY = "expiredInterestEnabled";
+  var EXPIRED_INTEREST_LOG_KEY = "expiredInterestLog";
+  var EXPIRED_INTEREST_STATS_KEY = "expiredInterestStats";
+  var EXPIRED_INTEREST_SENT_KEY = "expiredInterestSentIds";
+  var EXPIRED_INTEREST_LOCK_KEY = "expiredInterestLock";
+  var EXPIRED_INTEREST_STATUS_KEY = "expiredInterestStatus";
+  var EXPIRED_INTEREST_LAST_SCAN_KEY = "expiredInterestLastScan";
+  var MAX_LOG_ENTRIES = 300;
+  var MAX_SENT_IDS = 2e3;
+  var MAX_MARK_ATTEMPTS = 3;
+  var EXPIRED_SCAN_INTERVAL_MS = 6e4;
+  var MARK_GAP_MS = 1500;
+  var EXPIRED_LOCK_STALE_MS = 3 * 6e4;
+  function emptyStats(utcDate) {
+    return { utc_date: utcDate, sent_today: 0, sent_total: 0, last_scan_at: null, last_scan: null, last_error: null };
+  }
+  function statsForDay(stored, utcDate) {
+    const stats = stored && typeof stored === "object" ? stored : null;
+    if (!stats) {
+      return emptyStats(utcDate);
+    }
+    return stats.utc_date === utcDate ? stats : { ...stats, utc_date: utcDate, sent_today: 0 };
+  }
+  function normalizeSentIds(stored) {
+    const value = stored && typeof stored === "object" ? stored : {};
+    return {
+      done: Array.isArray(value.done) ? value.done.filter((id) => typeof id === "string") : [],
+      attempts: value.attempts && typeof value.attempts === "object" ? { ...value.attempts } : {}
+    };
+  }
+  function rememberDone(sent, offerId) {
+    const done = [...sent.done.filter((id) => id !== offerId), offerId].slice(-MAX_SENT_IDS);
+    const { [offerId]: _dropped, ...attempts } = sent.attempts;
+    return { done, attempts };
+  }
+  function rememberFailure(sent, offerId) {
+    const tries = (sent.attempts[offerId] ?? 0) + 1;
+    if (tries >= MAX_MARK_ATTEMPTS) {
+      return rememberDone(sent, offerId);
+    }
+    const attempts = { ...sent.attempts, [offerId]: tries };
+    const keys = Object.keys(attempts);
+    for (const key of keys.slice(0, Math.max(0, keys.length - MAX_SENT_IDS))) {
+      delete attempts[key];
+    }
+    return { done: sent.done, attempts };
+  }
+  function isHandled(sent, offerId) {
+    return sent.done.includes(offerId);
+  }
+  function prependLog(log, entry) {
+    const rows = Array.isArray(log) ? log : [];
+    return [entry, ...rows].slice(0, MAX_LOG_ENTRIES);
+  }
+
   // src/indiamart-api-adapter.ts
   var BL_DISPLAY_DATA_SOURCE = "im-leads-page-hook";
   var BL_DISPLAY_DATA_MESSAGE = "IM_BL_DISPLAY_DATA";
@@ -983,13 +999,15 @@
     const values = parsed && typeof parsed === "object" ? Object.values(parsed) : [value];
     return values.some((entry) => /retail lead/i.test(String(entry ?? "")));
   }
-  function parseBlApiRow(row) {
+  var LIVE_DATATYPES = /* @__PURE__ */ new Set(["lead"]);
+  var EXPIRED_DATATYPES = /* @__PURE__ */ new Set(["lead", "expiredlead"]);
+  function parseBlApiRow(row, dataTypes = LIVE_DATATYPES) {
     const ofrId = text2(row.ETO_OFR_ID) ?? text2(row.ETO_OFR_DISPLAY_ID);
     const title = text2(row.ETO_OFR_TITLE);
     if (!ofrId || !title) {
       return null;
     }
-    if (row.DATATYPE !== void 0 && row.DATATYPE !== "lead" || row.PURCHASE_STATUS && row.PURCHASE_STATUS !== "OPEN") {
+    if (row.DATATYPE !== void 0 && !dataTypes.has(String(row.DATATYPE)) || row.PURCHASE_STATUS && row.PURCHASE_STATUS !== "OPEN") {
       return null;
     }
     const enrichment = parseEnrichmentInfo(row.ENRICHMENTINFO);
@@ -1037,6 +1055,24 @@
       return [];
     }
     return list.map((row) => row && typeof row === "object" ? parseBlApiRow(row) : null).filter((lead) => lead !== null);
+  }
+  function parseExpiredBlDisplayData(payload) {
+    const list = payload?.DisplayList;
+    if (!Array.isArray(list)) {
+      return [];
+    }
+    const leads = [];
+    for (const row of list) {
+      if (!row || typeof row !== "object") {
+        continue;
+      }
+      const api = parseBlApiRow(row, EXPIRED_DATATYPES);
+      if (api) {
+        const shortlisted = String(row.SHORTLISTED ?? "").toUpperCase() === "YES";
+        leads.push({ api, shortlisted });
+      }
+    }
+    return leads;
   }
   var REALTIME_CHANNEL_NAME = "WebSocketChannel";
   var REALTIME_RESOURCES = /* @__PURE__ */ new Set(["realtime_bl", "realtime_bl_new"]);
@@ -1187,6 +1223,361 @@
       visible_text: [api.title, api.description, ...Object.entries(fields).map(([key, value]) => `${key}: ${value}`)].filter(Boolean).join(" | ")
     };
     return mergeApiLead(base, api, now);
+  }
+
+  // src/expired-interest-runner.ts
+  var STATE_KEYS = [
+    "authSession",
+    "selectedBusinessId",
+    "billingEntitlement",
+    "decisionConfig",
+    SAFETY_BRAKE_STORAGE_KEY,
+    EXPIRED_INTEREST_ENABLED_KEY,
+    EXPIRED_INTEREST_LOCK_KEY,
+    EXPIRED_INTEREST_SENT_KEY,
+    EXPIRED_INTEREST_STATS_KEY,
+    EXPIRED_INTEREST_LOG_KEY
+  ];
+  async function setStatus(deps, state) {
+    await deps.storageSet({ [EXPIRED_INTEREST_STATUS_KEY]: { state, at: new Date(deps.now()).toISOString() } });
+  }
+  function idle(state) {
+    return { state, marked: 0, counts: null };
+  }
+  function blockedReason(values, now) {
+    const session = values.authSession;
+    if (!session?.access_token) {
+      return "not_signed_in";
+    }
+    if (!billingAllows(values, now)) {
+      return "billing_not_confirmed";
+    }
+    const businessId = resolveSelectedBusinessId(values) ?? "";
+    const config = values.decisionConfig;
+    if (!config || String(config.business_id) !== businessId) {
+      return "filter_config_not_loaded";
+    }
+    if (safetyBrakeActive(values[SAFETY_BRAKE_STORAGE_KEY], now)) {
+      return "safety_brake";
+    }
+    return null;
+  }
+  function lockFree(values, owner, now) {
+    const lock = values[EXPIRED_INTEREST_LOCK_KEY];
+    return !lock?.owner || lock.owner === owner || typeof lock.at !== "number" || now - lock.at >= EXPIRED_LOCK_STALE_MS;
+  }
+  async function tripBrake(deps, retryAfterSeconds) {
+    const stored = await deps.storageGet([SAFETY_BRAKE_STORAGE_KEY]);
+    const brake = nextSafetyBrake(
+      stored?.[SAFETY_BRAKE_STORAGE_KEY],
+      "interest_rate_limited",
+      retryAfterSeconds,
+      deps.now()
+    );
+    await deps.storageSet({ [SAFETY_BRAKE_STORAGE_KEY]: brake });
+  }
+  function keywordsOf(config, ruleIds) {
+    const byId = new Map(config.keyword_rules.map((rule) => [String(rule.id), rule.keyword]));
+    return ruleIds.map((id) => byId.get(id)).filter((keyword) => Boolean(keyword));
+  }
+  async function runExpiredInterestScan(deps) {
+    const values = await deps.storageGet(STATE_KEYS);
+    if (!values || values[EXPIRED_INTEREST_ENABLED_KEY] !== true) {
+      return idle("stopped");
+    }
+    const now = deps.now();
+    const blocked = blockedReason(values, now);
+    if (blocked) {
+      await setStatus(deps, blocked);
+      return idle(blocked);
+    }
+    if (!lockFree(values, deps.ownerToken, now)) {
+      return idle("other_tab");
+    }
+    await deps.storageSet({ [EXPIRED_INTEREST_LOCK_KEY]: { owner: deps.ownerToken, at: now } });
+    const config = values.decisionConfig;
+    const list = await deps.bridgeRequest("IM_BL_EXPIRED_FETCH", {});
+    if (list.status === 429) {
+      await tripBrake(deps, list.retryAfterSeconds);
+      await setStatus(deps, "safety_brake");
+      return idle("safety_brake");
+    }
+    if (list.error === "not_logged_in") {
+      await setStatus(deps, "not_logged_in_indiamart");
+      return idle("not_logged_in_indiamart");
+    }
+    if (!list.ok || !Array.isArray(list.json?.DisplayList)) {
+      await setStatus(deps, "list_failed");
+      return idle("list_failed");
+    }
+    const counts = { A: 0, B: 0, C: 0, already_shortlisted: 0 };
+    let sent = normalizeSentIds(values[EXPIRED_INTEREST_SENT_KEY]);
+    let log = values[EXPIRED_INTEREST_LOG_KEY];
+    let stats = statsForDay(values[EXPIRED_INTEREST_STATS_KEY], utcDateString(now));
+    const toMark = [];
+    const rows = [];
+    for (const { api, shortlisted } of parseExpiredBlDisplayData(list.json)) {
+      const lead = apiLeadToCapturedLead(api, deps.sourceUrl(), now);
+      const ranking = rankExpiredLead(lead, config);
+      counts[ranking.rank] += 1;
+      if (shortlisted) {
+        counts.already_shortlisted += 1;
+      }
+      const entry = {
+        offer_id: api.ofr_id,
+        title: api.title,
+        country: api.country,
+        keywords: keywordsOf(config, ranking.matched_positive_rule_ids)
+      };
+      const row = { ...entry, rank: ranking.rank, reason: ranking.reason, shortlisted, action: "skipped" };
+      rows.push(row);
+      if (ranking.rank !== "A") {
+        continue;
+      }
+      if (isHandled(sent, api.ofr_id)) {
+        row.action = shortlisted ? "already" : "handled_before";
+        continue;
+      }
+      if (shortlisted) {
+        row.action = "already";
+        sent = rememberDone(sent, api.ofr_id);
+        log = prependLog(log, { ...entry, status: "already", error: null, at: new Date(now).toISOString() });
+        continue;
+      }
+      row.action = "queued";
+      toMark.push({ entry, mcatId: api.mcat_id, row });
+    }
+    stats = { ...stats, last_scan_at: new Date(now).toISOString(), last_scan: counts, last_error: null };
+    await deps.storageSet({
+      [EXPIRED_INTEREST_SENT_KEY]: sent,
+      [EXPIRED_INTEREST_LOG_KEY]: log,
+      [EXPIRED_INTEREST_STATS_KEY]: stats,
+      [EXPIRED_INTEREST_LAST_SCAN_KEY]: rows
+    });
+    await setStatus(deps, "running");
+    let marked = 0;
+    for (const [index, { entry, mcatId, row }] of toMark.entries()) {
+      if (index > 0) {
+        await deps.sleep(MARK_GAP_MS);
+        const latest = await deps.storageGet([EXPIRED_INTEREST_ENABLED_KEY, SAFETY_BRAKE_STORAGE_KEY]);
+        if (latest?.[EXPIRED_INTEREST_ENABLED_KEY] !== true) {
+          await setStatus(deps, "stopped");
+          return { state: "stopped", marked, counts };
+        }
+        if (safetyBrakeActive(latest?.[SAFETY_BRAKE_STORAGE_KEY], deps.now())) {
+          await setStatus(deps, "safety_brake");
+          return { state: "safety_brake", marked, counts };
+        }
+      }
+      const result = await deps.bridgeRequest("IM_BL_MARK_SHORTLIST", buildMarkShortlistPayload("", { offerId: entry.offer_id, mcatId }));
+      const outcome = parseMarkShortlistResult(result);
+      const at = new Date(deps.now()).toISOString();
+      if (outcome.kind === "rate_limited") {
+        await tripBrake(deps, outcome.retryAfterSeconds);
+        stats = { ...stats, last_error: "IndiaMART rate-limited I am Interested" };
+        await deps.storageSet({ [EXPIRED_INTEREST_STATS_KEY]: stats });
+        await setStatus(deps, "safety_brake");
+        return { state: "safety_brake", marked, counts };
+      }
+      if (outcome.kind === "retry") {
+        row.action = "retry";
+        stats = { ...stats, last_error: `I am Interested got no answer (${outcome.message}); retrying next scan` };
+      } else if (outcome.kind === "ok") {
+        row.action = "marked";
+        marked += 1;
+        sent = rememberDone(sent, entry.offer_id);
+        stats = { ...stats, sent_today: stats.sent_today + 1, sent_total: stats.sent_total + 1 };
+        log = prependLog(log, { ...entry, status: "interested", error: null, at });
+      } else if (outcome.kind === "already") {
+        row.action = "already";
+        sent = rememberDone(sent, entry.offer_id);
+        log = prependLog(log, { ...entry, status: "already", error: null, at });
+      } else {
+        row.action = "failed";
+        sent = rememberFailure(sent, entry.offer_id);
+        stats = { ...stats, last_error: outcome.message };
+        log = prependLog(log, { ...entry, status: "failed", error: outcome.message, at });
+      }
+      await deps.storageSet({
+        [EXPIRED_INTEREST_SENT_KEY]: sent,
+        [EXPIRED_INTEREST_LOG_KEY]: log,
+        [EXPIRED_INTEREST_STATS_KEY]: stats,
+        [EXPIRED_INTEREST_LAST_SCAN_KEY]: rows,
+        [EXPIRED_INTEREST_LOCK_KEY]: { owner: deps.ownerToken, at: deps.now() }
+      });
+    }
+    return { state: "running", marked, counts };
+  }
+  function startExpiredInterestLoop(deps) {
+    let timer = null;
+    let running = false;
+    let again = false;
+    let stopped = false;
+    const schedule = (ms) => {
+      if (timer) {
+        clearTimeout(timer);
+      }
+      timer = stopped ? null : setTimeout(tick, ms);
+    };
+    async function tick() {
+      timer = null;
+      if (running) {
+        again = true;
+        return;
+      }
+      running = true;
+      try {
+        await runExpiredInterestScan(deps);
+      } catch {
+      } finally {
+        running = false;
+      }
+      schedule(again ? 0 : EXPIRED_SCAN_INTERVAL_MS);
+      again = false;
+    }
+    schedule(0);
+    return {
+      runNow: () => schedule(0),
+      stop: () => {
+        stopped = true;
+        if (timer) {
+          clearTimeout(timer);
+        }
+        timer = null;
+      },
+      release: async () => {
+        const values = await deps.storageGet([EXPIRED_INTEREST_LOCK_KEY]);
+        const lock = values?.[EXPIRED_INTEREST_LOCK_KEY];
+        if (lock?.owner === deps.ownerToken) {
+          await deps.storageSet({ [EXPIRED_INTEREST_LOCK_KEY]: null });
+        }
+      }
+    };
+  }
+
+  // src/country-iso.ts
+  var RETIRED_CODES = /* @__PURE__ */ new Set(["AN", "BU", "CS", "DD", "DY", "EU", "EZ", "FX", "HV", "NH", "NT", "QO", "RH", "SU", "TP", "UN", "VD", "XA", "XB", "XK", "YD", "YU", "ZR", "ZZ"]);
+  var EXTRA_NAMES = {
+    usa: "US",
+    us: "US",
+    "u s a": "US",
+    america: "US",
+    "united states of america": "US",
+    uk: "UK",
+    gb: "UK",
+    britain: "UK",
+    "great britain": "UK",
+    england: "UK",
+    uae: "AE",
+    emirates: "AE",
+    "czech republic": "CZ",
+    "ivory coast": "CI",
+    "cote d ivoire": "CI",
+    burma: "MM",
+    myanmar: "MM",
+    "hong kong": "HK",
+    palestine: "PS",
+    congo: "CG",
+    "republic of the congo": "CG",
+    "democratic republic of the congo": "CD",
+    "holy see": "VA",
+    vatican: "VA",
+    "cabo verde": "CV",
+    turkey: "TR",
+    "east timor": "TL",
+    "timor leste": "TL",
+    korea: "KR",
+    "south korea": "KR"
+  };
+  function normalizeCountry(value) {
+    return value.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/&/g, " and ").replace(/[^a-z0-9]+/g, " ").trim();
+  }
+  var namesToCodes = null;
+  function countryCodes() {
+    if (namesToCodes) {
+      return namesToCodes;
+    }
+    const codes = /* @__PURE__ */ new Map();
+    try {
+      const names = new Intl.DisplayNames(["en"], { type: "region" });
+      for (let first = 65; first <= 90; first += 1) {
+        for (let second = 65; second <= 90; second += 1) {
+          const code = String.fromCharCode(first, second);
+          const name = RETIRED_CODES.has(code) ? void 0 : names.of(code);
+          if (name && name !== code) {
+            codes.set(normalizeCountry(name), code === "GB" ? "UK" : code);
+          }
+        }
+      }
+    } catch {
+    }
+    for (const [name, code] of Object.entries(EXTRA_NAMES)) {
+      codes.set(name, code);
+    }
+    namesToCodes = codes;
+    return codes;
+  }
+  function countryIso(country) {
+    const normalized = normalizeCountry(country);
+    if (!normalized) {
+      return null;
+    }
+    const known = countryCodes().get(normalized);
+    if (known) {
+      return known;
+    }
+    const code = normalized.toUpperCase();
+    return /^[A-Z]{2}$/.test(code) && [...countryCodes().values()].includes(code) ? code : null;
+  }
+  var isoFilterCache = /* @__PURE__ */ new WeakMap();
+  function leadListIsoFilter(config) {
+    if (isoFilterCache.has(config)) {
+      return isoFilterCache.get(config) ?? null;
+    }
+    const result = computeIsoFilter(config);
+    isoFilterCache.set(config, result);
+    return result;
+  }
+  function computeIsoFilter(config) {
+    let countries = config.settings.allowed_countries.filter((country) => country.trim());
+    if (!countries.length) {
+      const positives = config.keyword_rules.filter((rule) => rule.type === "positive");
+      if (!positives.length || positives.some((rule) => !(rule.allowed_countries ?? []).some((country) => country.trim()))) {
+        return null;
+      }
+      countries = positives.flatMap((rule) => rule.allowed_countries ?? []);
+    }
+    const codes = /* @__PURE__ */ new Set();
+    for (const country of countries) {
+      const code = countryIso(country);
+      if (!code || code === "IN") {
+        return null;
+      }
+      codes.add(code);
+    }
+    return [...codes].sort();
+  }
+  function leadListIsoFilterGap(config) {
+    if (leadListIsoFilter(config)) {
+      return null;
+    }
+    const countries = config.settings.allowed_countries.filter((country) => country.trim());
+    if (!countries.length) {
+      return "no country filter: every country can be captured";
+    }
+    const unknown = countries.find((country) => !countryIso(country));
+    if (unknown) {
+      return `country not recognised: ${unknown}`;
+    }
+    return "India is allowed: Indian leads are listed by state, not country";
+  }
+  function shuffledIsoParam(codes, random = Math.random) {
+    const shuffled = codes.slice();
+    for (let index = shuffled.length - 1; index > 0; index -= 1) {
+      const other = Math.floor(random() * (index + 1));
+      [shuffled[index], shuffled[other]] = [shuffled[other], shuffled[index]];
+    }
+    return shuffled.join(",");
   }
 
   // src/content-script-core.ts
@@ -1466,10 +1857,18 @@
       }).catch(() => void 0);
       const enrichment = enrichmentFromBuy(api, outcome, window.location.href);
       if (!enrichmentHasBuyerData(enrichment)) {
-        await recordEnrichmentAttempt(marker, "contact_details_not_retrieved", void 0, true);
+        await recordEnrichmentAttempt(marker, `contact_details_not_retrieved:${outcome.raw}`, Number.POSITIVE_INFINITY, true);
       } else if (!await sendLeadEnrichment(marker, enrichment)) {
-        await recordEnrichmentAttempt(marker, "enrichment_not_stored");
+        parkedEnrichments.set(marker.client_event_id, enrichment);
+        await recordEnrichmentAttempt(marker, "enrichment_not_stored", Number.POSITIVE_INFINITY);
       }
+    } else if (outcome.kind === "bought_no_details") {
+      await recordEnrichmentAttempt(
+        marker,
+        `bought_no_details:${outcome.message} ${outcome.raw} (${timing})`,
+        Number.POSITIVE_INFINITY,
+        true
+      );
     } else if (outcome.kind === "lost") {
       await recordEnrichmentAttempt(marker, `lost:${outcome.message} (${timing})`, Number.POSITIVE_INFINITY, true);
     } else if (outcome.kind === "rate_limited") {
@@ -2045,6 +2444,7 @@
       iso_gap: isoFilter ? null : leadListIsoFilterGap(config)
     });
     autoEnrichCapturedLeadMarkers([...markersByClientEventId.values()]);
+    sendParkedEnrichments([...parkedEnrichments.keys()].map((id) => ({ client_event_id: id })));
     return nextPollDelayMs(pollGapMs);
   }
   function decidePolledLeads(leads, businessId, config, source = "poll", receivedAt = Date.now()) {
@@ -2414,6 +2814,42 @@
       scheduleApiPoll(0);
     }
   }
+  var expiredInterestStarted = false;
+  function startExpiredInterest() {
+    if (expiredInterestStarted || window.top !== window || !/^\/bltxn(\/|$)/.test(window.location.pathname)) {
+      return;
+    }
+    expiredInterestStarted = true;
+    const deps = {
+      bridgeRequest,
+      storageGet: safeStorageGet,
+      storageSet: safeStorageSet,
+      sleep: (ms) => new Promise((resolve) => window.setTimeout(resolve, ms)),
+      now: () => Date.now(),
+      sourceUrl: () => window.location.href,
+      ownerToken: `interest-${pollOwnerToken}`
+    };
+    let loop = startExpiredInterestLoop(deps);
+    try {
+      chrome.storage.onChanged.addListener((changes, area) => {
+        if (area === "local" && changes[EXPIRED_INTEREST_ENABLED_KEY]?.newValue === true) {
+          loop?.runNow();
+        }
+      });
+    } catch (caught) {
+      handleChromeApiError(caught);
+    }
+    window.addEventListener("pagehide", () => {
+      loop?.stop();
+      void loop?.release().catch(() => void 0);
+      loop = null;
+    });
+    window.addEventListener("pageshow", (event) => {
+      if (event.persisted && !loop) {
+        loop = startExpiredInterestLoop(deps);
+      }
+    });
+  }
   function initializeIndiaMartContentScript() {
     const context = detectPageContext(window.location.href, document.title);
     if (context === "indiamart_allowed") {
@@ -2429,6 +2865,7 @@
       startCaptureStateSync();
       startServiceWorkerKeepalive();
       startInactivityWatcher();
+      startExpiredInterest();
     }
     chrome.runtime.onMessage.addListener((message) => {
       if (message?.type === "BUSINESS_SELECTION_CHANGED") {

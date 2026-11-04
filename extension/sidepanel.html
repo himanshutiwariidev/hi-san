@@ -9,7 +9,7 @@
   <body>
     <header class="log-header">
       <div class="log-title">
-        <img src="icons/hisan-mark.svg" alt="Hi-San Bot" width="28" height="28" />
+        <img src="icons/hisan-mark.svg" alt="" width="28" height="28" />
         <div>
           <h1>Activity log</h1>
           <p id="log-business">-</p>
@@ -21,6 +21,14 @@
     </header>
     <p id="log-brake" class="log-brake" role="status" hidden></p>
 
+    <nav class="view-switch" aria-label="Activity">
+      <button type="button" class="view-button active" data-view="leads" aria-pressed="true">Leads</button>
+      <button type="button" class="view-button" data-view="rank" aria-pressed="false">
+        Lead Rank <span class="beta-badge">Beta</span>
+      </button>
+    </nav>
+
+    <div id="view-leads">
     <nav class="log-filters" aria-label="Show">
       <button type="button" class="log-filter active" data-filter="all" aria-pressed="true">
         All <em id="count-all">0</em>
@@ -46,6 +54,59 @@
     <div id="log-empty" class="log-empty" hidden>
       <strong id="log-empty-title">No leads yet</strong>
       <p id="log-empty-text">Leads appear here the moment the bot decides on them on an IndiaMART BuyLead page.</p>
+    </div>
+
+    </div>
+
+    <div id="view-rank" hidden>
+      <section class="rank-summary">
+        <div class="rank-summary-head">
+          <div>
+            <strong>Expired Lead Interest</strong>
+            <p id="rank-status" class="rank-status">Stopped</p>
+          </div>
+          <button id="rank-toggle" class="rank-toggle stopped" type="button">Start</button>
+        </div>
+        <div class="rank-stats">
+          <div><em id="rank-today">0</em><span>Interested today</span></div>
+          <div><em id="rank-total">0</em><span>Interested total</span></div>
+        </div>
+        <p id="rank-scan" class="rank-scan">No scan yet</p>
+        <p id="rank-error" class="rank-error" hidden></p>
+      </section>
+
+      <details class="rank-lastscan">
+        <summary>Last scan: why each lead was or was not sent <em id="rank-lastscan-count">0</em></summary>
+        <ol id="rank-lastscan-list" class="rank-lastscan-list"></ol>
+        <p id="rank-lastscan-empty" class="rank-scan">No scan yet</p>
+      </details>
+
+      <nav class="log-filters" aria-label="Show rank A leads">
+        <button type="button" class="rank-filter log-filter active" data-rank-filter="all" aria-pressed="true">
+          All <em id="rank-count-all">0</em>
+        </button>
+        <button type="button" class="rank-filter log-filter" data-rank-filter="interested" aria-pressed="false">
+          Interested <em id="rank-count-interested">0</em>
+        </button>
+        <button type="button" class="rank-filter log-filter" data-rank-filter="already" aria-pressed="false">
+          Already <em id="rank-count-already">0</em>
+        </button>
+        <button type="button" class="rank-filter log-filter" data-rank-filter="failed" aria-pressed="false">
+          Failed <em id="rank-count-failed">0</em>
+        </button>
+      </nav>
+
+      <div class="log-tools rank-tools">
+        <input id="rank-search" type="search" placeholder="Search title, country, keyword…" autocomplete="off" />
+        <button id="rank-clear" class="rank-clear" type="button">Clear log</button>
+      </div>
+
+      <main id="rank-list" class="log-list rank-list" aria-live="polite"></main>
+
+      <div id="rank-empty" class="log-empty" hidden>
+        <strong id="rank-empty-title">No rank A leads yet</strong>
+        <p id="rank-empty-text">Start Expired Lead Interest from the popup's Lead Rank tab. Rank A leads and their “I am Interested” result appear here.</p>
+      </div>
     </div>
 
     <script type="module" src="sidepanel.js"></script>

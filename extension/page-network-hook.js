@@ -5,13 +5,14 @@
   var BL_CONTACT_BUY_URL = "https://seller.indiamart.com/blreact/contactBuyNow";
   var BRIDGE_REQUEST_EVENT = "im-leads-bridge-request";
   var BRIDGE_RESPONSE_EVENT = "im-leads-bridge-response";
+  var BRIDGE_REQUEST_TYPES = /* @__PURE__ */ new Set(["IM_BL_FETCH", "IM_BL_BUY", "IM_BL_EXPIRED_FETCH", "IM_BL_MARK_SHORTLIST"]);
   function decodeBridgeRequest(detail) {
     if (typeof detail !== "string") {
       return null;
     }
     try {
       const parsed = JSON.parse(detail);
-      if (parsed?.type !== "IM_BL_FETCH" && parsed?.type !== "IM_BL_BUY" || typeof parsed.requestId !== "string" || !parsed.requestId) {
+      if (!parsed || typeof parsed.type !== "string" || !BRIDGE_REQUEST_TYPES.has(parsed.type) || typeof parsed.requestId !== "string" || !parsed.requestId) {
         return null;
       }
       const payload = parsed.payload && typeof parsed.payload === "object" ? parsed.payload : {};
@@ -68,6 +69,21 @@ ${body}`;
       end: POLL_PAGE_SIZE
     };
   }
+
+  // src/expired-interest.ts
+  var MARK_SHORTLIST_URL = "https://seller.indiamart.com/blreact/markShortlist";
+  var EXPIRED_DISPLAY_OVERRIDES = {
+    LocPref: "3",
+    pref_city_lead: 0,
+    inbox: "P",
+    expired: 1,
+    start: 1,
+    end: 20
+  };
+  function buildExpiredDisplayRequest(glid) {
+    return { ...buildDisplayRequest(glid, null), ...EXPIRED_DISPLAY_OVERRIDES, glusrid: glid };
+  }
+  var EXPIRED_LOCK_STALE_MS = 3 * 6e4;
 
   // src/indiamart-api-adapter.ts
   var BL_DISPLAY_DATA_SOURCE = "im-leads-page-hook";
@@ -137,6 +153,8 @@ ${body}`;
   var handledRequestIds = /* @__PURE__ */ new Set();
   var listBudget = createRequestBudget(LIST_REQUESTS_PER_MINUTE);
   var buyBudget = createRequestBudget(BUY_REQUESTS_PER_MINUTE);
+  var EXPIRED_REQUESTS_PER_MINUTE = 30;
+  var expiredBudget = createRequestBudget(EXPIRED_REQUESTS_PER_MINUTE);
   var foldRequest = createRequestFolder();
   function retryAfterSeconds(header) {
     const seconds = Number(header);
@@ -162,7 +180,8 @@ ${body}`;
   function rememberRequestBody(body) {
     try {
       const parsed = typeof body === "string" ? JSON.parse(body) : null;
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const expiredList = Boolean(parsed && typeof parsed === "object" && parsed.expired);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && !expiredList) {
         const { glusrid: _glid, start: _start, end: _end, ...template } = parsed;
         displayRequestTemplate = template;
       }
@@ -315,7 +334,8 @@ ${body}`;
     if (!glid) {
       return refused("not_logged_in", glid);
     }
-    const budget = type === "IM_BL_FETCH" ? listBudget : buyBudget;
+    const expired = type === "IM_BL_EXPIRED_FETCH" || type === "IM_BL_MARK_SHORTLIST";
+    const budget = expired ? expiredBudget : type === "IM_BL_FETCH" ? listBudget : buyBudget;
     if (!budget.tryTake().ok && !await takeBudgetSlot(budget)) {
       return refused("request_budget_exceeded", glid);
     }
@@ -323,6 +343,14 @@ ${body}`;
       const iso = typeof payload.iso === "string" && payload.iso ? payload.iso : "";
       const body = iso ? buildDisplayRequest(glid, { iso }) : buildDisplayRequest(glid, displayRequestTemplate);
       const raw2 = await postJson(BL_DISPLAY_DATA_URL, body);
+      return { ...raw2, result: { ...raw2.result, glid } };
+    }
+    if (type === "IM_BL_EXPIRED_FETCH") {
+      const raw2 = await postJson(BL_DISPLAY_DATA_URL, buildExpiredDisplayRequest(glid));
+      return { ...raw2, result: { ...raw2.result, glid } };
+    }
+    if (type === "IM_BL_MARK_SHORTLIST") {
+      const raw2 = await postJson(MARK_SHORTLIST_URL, { ...payload, glusrid: glid });
       return { ...raw2, result: { ...raw2.result, glid } };
     }
     const raw = await postJson(BL_CONTACT_BUY_URL, { ...payload, glusrId: glid });
@@ -339,6 +367,12 @@ ${body}`;
     }
   }
   function bridgeRequestKey(type, payload) {
+    if (type === "IM_BL_EXPIRED_FETCH") {
+      return "expired-list";
+    }
+    if (type === "IM_BL_MARK_SHORTLIST") {
+      return `shortlist:${String(payload.ofrid ?? "")}`;
+    }
     return type === "IM_BL_FETCH" ? "list" : `buy:${String(payload.ofrid ?? "")}`;
   }
   function startRequestBridge() {

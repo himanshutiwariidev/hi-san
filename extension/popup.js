@@ -1,3 +1,270 @@
+// ../../packages/schemas/dist/index.js
+var DEFAULT_DAILY_CAPTURE_LIMIT = 11;
+function anyContactModeIgnoresChannels(mode) {
+  return mode === "one_verified" || mode === "one_available_one_verified";
+}
+var EMAIL_MODE_OPTIONS = [
+  { value: "off", label: "Off", hint: "Email is not checked." },
+  { value: "available", label: "Available", hint: "The lead must show an email address (verified or not)." },
+  { value: "verified", label: "Verified", hint: "IndiaMART must mark the buyer's email as verified." }
+];
+var PHONE_MODE_OPTIONS = [
+  { value: "off", label: "Off", hint: "Phone is not checked." },
+  { value: "available", label: "Available", hint: "The lead must show a phone number or an active WhatsApp (verified or not)." },
+  { value: "verified", label: "Verified", hint: "IndiaMART must mark the buyer's mobile number as verified." }
+];
+var ANY_CONTACT_OPTIONS = [
+  { value: "off", label: "Off", hint: "Email and Phone are checked separately: every one that is not Off must pass." },
+  {
+    value: "required",
+    label: "Either one",
+    hint: "The Email OR the Phone setting must pass, not both. With both Off, the lead must show at least one contact."
+  },
+  {
+    value: "one_verified",
+    label: "Any Verified",
+    hint: "IndiaMART must have verified the buyer's email or mobile number. Email and Phone settings are ignored."
+  },
+  {
+    value: "one_available_one_verified",
+    label: "One Available + One Verified",
+    hint: "Email and phone must both be shown and at least one must be verified by IndiaMART. Email and Phone settings are ignored."
+  }
+];
+var FILTER_CHECK_ORDER = [
+  { title: "Readable lead", detail: "Leads without a real title are skipped." },
+  { title: "Lead age", detail: "Older than Max lead age is skipped." },
+  { title: "Country", detail: "Must be one of the allowed countries (if any are set)." },
+  { title: "Indian state", detail: "Leads from India must come from an allowed state (if any are set)." },
+  {
+    title: "Contact",
+    detail: 'Email setting, then Phone setting, then Any Contact decides how they combine. With "Trusted buyers skip contact filter" on, a buyer on IndiaMART 1+ years with any email or phone shown or verified passes this check; every other check still applies.'
+  },
+  { title: "GST verified", detail: 'Only when "Only GST-verified buyers" is on.' },
+  { title: "Buyer membership", detail: "Buyer must be on IndiaMART for at least the minimum months." },
+  { title: "Category", detail: "Blocked categories are skipped; with an allow list, the category must be on it." },
+  { title: "Excluded keywords", detail: "Any excluded keyword in the title skips the lead." },
+  { title: "Keyword match", detail: "A keyword must match the title, with its own country, state, unit and minimum quantity." },
+  { title: "Retail", detail: "Retail leads are off, and the lead is below the retail quantity or marked Retail by IndiaMART." },
+  { title: "Daily limits", detail: "Each keyword's limit, then the business limit (never above the account's daily cap)." }
+];
+function normalizeChannelContactMode(value) {
+  if (value === "available") {
+    return "available";
+  }
+  if (value === "verified" || value === "verified_only" || value === "required" || value === "available_and_verified") {
+    return "verified";
+  }
+  return "off";
+}
+function normalizeAnyContactMode(value) {
+  return value === "required" || value === "one_verified" || value === "one_available_one_verified" ? value : "off";
+}
+var SKIP_REASON_LABELS = {
+  country_not_allowed: "Country Not Matched",
+  contact_requirement_not_met: "Contact Not Matched",
+  negative_keyword_match: "Excluded Keyword",
+  no_positive_keyword_match: "Keyword Not Matched",
+  quantity_below_minimum: "Quantity Not Matched",
+  unit_mismatch: "Unit Not Matched",
+  retail_lead: "Retail Lead",
+  daily_limit_reached: "Daily Limit Reached",
+  keyword_daily_limit_reached: "Keyword Limit Reached",
+  invalid_title: "Unreadable Lead",
+  lead_too_old: "Lead Too Old",
+  state_not_allowed: "State Not Matched",
+  keyword_country_mismatch: "Keyword Country Not Matched",
+  keyword_state_mismatch: "Keyword State Not Matched",
+  gst_not_verified: "GST Not Verified",
+  buyer_too_new: "Buyer Too New",
+  category_not_allowed: "Category Not Matched",
+  indiamart_not_retrieved: "IndiaMART Side Lead Not Retrieved"
+};
+var BUSINESS_SKIP_REASON_OPTIONS = Object.entries(SKIP_REASON_LABELS).filter(([reason]) => reason !== "indiamart_not_retrieved");
+
+// src/fast-buy.ts
+var SAFETY_BRAKE_STEPS_MS = [2 * 6e4, 5 * 6e4, 15 * 6e4];
+var SAFETY_BRAKE_RESET_MS = 30 * 6e4;
+var MAX_SAFETY_BRAKE_MS = 60 * 6e4;
+var DEFAULT_BUY_RATE_LIMIT_COOLDOWN_SECONDS = SAFETY_BRAKE_STEPS_MS[0] / 1e3;
+function safetyBrakeActive(brake, now = Date.now()) {
+  return Boolean(brake && brake.until > now);
+}
+var SAFETY_BRAKE_STORAGE_KEY = "imSafetyBrake";
+var SAFETY_BRAKE_REASON_TEXT = {
+  list_rate_limited: "IndiaMART rate-limited the lead list",
+  buy_rate_limited: "IndiaMART rate-limited a buy",
+  list_activity_warning: "IndiaMART reported high activity",
+  page_list_rate_limited: "IndiaMART rate-limited the page's lead list",
+  indiamart_activity_warning: "IndiaMART showed a high-activity warning"
+};
+function safetyBrakeNotice(brake, now = Date.now()) {
+  if (!brake || !safetyBrakeActive(brake, now)) {
+    return null;
+  }
+  const resumes = new Date(brake.until).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const why = SAFETY_BRAKE_REASON_TEXT[brake.reason] ?? "IndiaMART pushed back";
+  return `Paused for account safety: ${why}. Polling and buying resume at ${resumes}.`;
+}
+
+// src/activity-log.ts
+function relativeTime(iso, now = Date.now()) {
+  const seconds = Math.max(0, Math.round((now - Date.parse(iso)) / 1e3));
+  if (!Number.isFinite(seconds)) {
+    return "";
+  }
+  if (seconds < 45) {
+    return "just now";
+  }
+  if (seconds < 3600) {
+    return `${Math.round(seconds / 60)}m ago`;
+  }
+  if (seconds < 86400) {
+    return `${Math.floor(seconds / 3600)}h ago`;
+  }
+  return new Date(iso).toLocaleDateString(void 0, { day: "numeric", month: "short" });
+}
+
+// src/expired-interest.ts
+var EXPIRED_INTEREST_ENABLED_KEY = "expiredInterestEnabled";
+var EXPIRED_INTEREST_LOG_KEY = "expiredInterestLog";
+var EXPIRED_INTEREST_STATS_KEY = "expiredInterestStats";
+var EXPIRED_INTEREST_STATUS_KEY = "expiredInterestStatus";
+var EXPIRED_LOCK_STALE_MS = 3 * 6e4;
+function emptyStats(utcDate) {
+  return { utc_date: utcDate, sent_today: 0, sent_total: 0, last_scan_at: null, last_scan: null, last_error: null };
+}
+function statsForDay(stored, utcDate) {
+  const stats = stored && typeof stored === "object" ? stored : null;
+  if (!stats) {
+    return emptyStats(utcDate);
+  }
+  return stats.utc_date === utcDate ? stats : { ...stats, utc_date: utcDate, sent_today: 0 };
+}
+function statusLabel(status) {
+  switch (status) {
+    case "interested":
+      return "Interested \u2713";
+    case "already":
+      return "Already shortlisted";
+    default:
+      return "Failed";
+  }
+}
+var RUN_STATUS_TEXT = {
+  running: "Running",
+  stopped: "Stopped",
+  not_signed_in: "Sign in to start",
+  billing_not_confirmed: "Waiting for plan check",
+  filter_config_not_loaded: "Keywords not loaded yet",
+  safety_brake: "Paused for account safety",
+  other_tab: "Running in another IndiaMART tab",
+  not_logged_in_indiamart: "Log in to IndiaMART",
+  list_failed: "Could not read expired leads; retrying"
+};
+function runStatusText(state) {
+  return RUN_STATUS_TEXT[state ?? ""] ?? (state || "Open an IndiaMART BuyLeads tab");
+}
+
+// src/lead-decision.ts
+function utcDateString(now = Date.now()) {
+  return new Date(now).toISOString().slice(0, 10);
+}
+
+// src/rank-log-view.ts
+var ACTIVITY_PANEL_VIEW_KEY = "activityPanelView";
+function readRankLog(value) {
+  return Array.isArray(value) ? value : [];
+}
+function rankLogRow(entry, tag = "li") {
+  const item = document.createElement(tag);
+  item.className = "rank-row";
+  const title = document.createElement("strong");
+  title.textContent = entry.title;
+  const meta = document.createElement("div");
+  meta.className = "rank-meta";
+  const badge = document.createElement("span");
+  badge.className = "rank-badge";
+  badge.dataset.status = entry.status;
+  badge.textContent = entry.status === "failed" && entry.error ? `${statusLabel(entry.status)} \xB7 ${entry.error}` : statusLabel(entry.status);
+  const parts = [entry.country, entry.keywords.length ? `Keyword: ${entry.keywords.join(", ")}` : null, relativeTime(entry.at)].filter(
+    (part) => Boolean(part)
+  );
+  meta.append(badge, ...parts.map((part) => Object.assign(document.createElement("span"), { textContent: part })));
+  item.append(title, meta);
+  return item;
+}
+
+// src/popup-rank.ts
+var KEYS = [EXPIRED_INTEREST_ENABLED_KEY, EXPIRED_INTEREST_LOG_KEY, EXPIRED_INTEREST_STATS_KEY, EXPIRED_INTEREST_STATUS_KEY];
+var STATUS_STALE_MS = 15e4;
+var POPUP_LOG_ROWS = 5;
+function element(selector) {
+  return document.querySelector(selector);
+}
+function interestStatusLine(enabled, status, now = Date.now()) {
+  if (!enabled) {
+    return { text: "Stopped", tone: "" };
+  }
+  const at = Date.parse(status?.at ?? "");
+  if (!status || !Number.isFinite(at) || now - at > STATUS_STALE_MS) {
+    return { text: "Waiting: open an IndiaMART BuyLeads tab", tone: "warn" };
+  }
+  return { text: runStatusText(status.state), tone: status.state === "running" ? "ok" : "warn" };
+}
+function openActivityPanel(view) {
+  void chrome.storage.local.set({ [ACTIVITY_PANEL_VIEW_KEY]: view }).catch(() => void 0).finally(() => {
+    chrome.windows.getCurrent((window2) => {
+      if (window2.id !== void 0) {
+        void chrome.sidePanel.open({ windowId: window2.id }).then(() => globalThis.close());
+      }
+    });
+  });
+}
+async function paint() {
+  const values = await chrome.storage.local.get(KEYS).catch(() => ({}));
+  const enabled = values[EXPIRED_INTEREST_ENABLED_KEY] === true;
+  const toggle = element("#interest-toggle");
+  if (!toggle) {
+    return;
+  }
+  toggle.textContent = enabled ? "Stop" : "Start";
+  toggle.classList.toggle("stopped", !enabled);
+  const line = interestStatusLine(enabled, values[EXPIRED_INTEREST_STATUS_KEY]);
+  const status = element("#interest-status");
+  status.textContent = line.text;
+  status.dataset.tone = line.tone;
+  const stats = statsForDay(values[EXPIRED_INTEREST_STATS_KEY], utcDateString());
+  element("#interest-today").textContent = String(stats.sent_today);
+  element("#interest-total").textContent = String(stats.sent_total);
+  const scan = stats.last_scan;
+  element("#interest-scan").textContent = scan && stats.last_scan_at ? `Last scan ${relativeTime(stats.last_scan_at)}: A ${scan.A} \xB7 B ${scan.B} \xB7 C ${scan.C} \xB7 already shortlisted ${scan.already_shortlisted}` : "No scan yet";
+  const error = element("#interest-error");
+  error.hidden = !stats.last_error;
+  error.textContent = stats.last_error ? `Last error: ${stats.last_error}` : "";
+  const log = readRankLog(values[EXPIRED_INTEREST_LOG_KEY]);
+  element("#interest-log").replaceChildren(...log.slice(0, POPUP_LOG_ROWS).map((entry) => rankLogRow(entry)));
+  element("#interest-log-empty").hidden = log.length > 0;
+}
+function initLeadRankTab() {
+  const toggle = element("#interest-toggle");
+  if (!toggle) {
+    return;
+  }
+  toggle.addEventListener("click", async () => {
+    const values = await chrome.storage.local.get([EXPIRED_INTEREST_ENABLED_KEY]);
+    await chrome.storage.local.set({ [EXPIRED_INTEREST_ENABLED_KEY]: values[EXPIRED_INTEREST_ENABLED_KEY] !== true });
+  });
+  element("#interest-open-panel")?.addEventListener("click", () => openActivityPanel("rank"));
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === "local" && KEYS.some((key) => key in changes)) {
+      void paint();
+    }
+  });
+  window.setInterval(() => void paint(), 15e3);
+  void paint();
+}
+
 // src/billing-access.ts
 var ENTITLEMENT_FRESH_MS = 65e3;
 var ENTITLEMENT_OUTAGE_GRACE_MS = 10 * 6e4;
@@ -100,118 +367,9 @@ function botPresenceView(local, poll, presence, businessId, now = Date.now()) {
 var API_BASE_URL = "https://hi-san.medishipper.com/api";
 var DASHBOARD_URL = "https://hi-san.medishipper.com";
 
-// ../../packages/schemas/dist/index.js
-var HARD_DAILY_CAPTURE_LIMIT = 11;
-function anyContactModeIgnoresChannels(mode) {
-  return mode === "one_verified" || mode === "one_available_one_verified";
-}
-var EMAIL_MODE_OPTIONS = [
-  { value: "off", label: "Off", hint: "Email is not checked." },
-  { value: "available", label: "Available", hint: "The lead must show an email address (verified or not)." },
-  { value: "verified", label: "Verified", hint: "IndiaMART must mark the buyer's email as verified." }
-];
-var PHONE_MODE_OPTIONS = [
-  { value: "off", label: "Off", hint: "Phone is not checked." },
-  { value: "available", label: "Available", hint: "The lead must show a phone number or an active WhatsApp (verified or not)." },
-  { value: "verified", label: "Verified", hint: "IndiaMART must mark the buyer's mobile number as verified." }
-];
-var ANY_CONTACT_OPTIONS = [
-  { value: "off", label: "Off", hint: "Email and Phone are checked separately: every one that is not Off must pass." },
-  {
-    value: "required",
-    label: "Either one",
-    hint: "The Email OR the Phone setting must pass, not both. With both Off, the lead must show at least one contact."
-  },
-  {
-    value: "one_verified",
-    label: "Any Verified",
-    hint: "IndiaMART must have verified the buyer's email or mobile number. Email and Phone settings are ignored."
-  },
-  {
-    value: "one_available_one_verified",
-    label: "One Available + One Verified",
-    hint: "Email and phone must both be shown and at least one must be verified by IndiaMART. Email and Phone settings are ignored."
-  }
-];
-var FILTER_CHECK_ORDER = [
-  { title: "Readable lead", detail: "Leads without a real title are skipped." },
-  { title: "Lead age", detail: "Older than Max lead age is skipped." },
-  { title: "Country", detail: "Must be one of the allowed countries (if any are set)." },
-  { title: "Indian state", detail: "Leads from India must come from an allowed state (if any are set)." },
-  {
-    title: "Contact",
-    detail: 'Email setting, then Phone setting, then Any Contact decides how they combine. With "Trusted buyers skip contact filter" on, a buyer on IndiaMART 1+ years with any email or phone shown or verified passes this check; every other check still applies.'
-  },
-  { title: "GST verified", detail: 'Only when "Only GST-verified buyers" is on.' },
-  { title: "Buyer membership", detail: "Buyer must be on IndiaMART for at least the minimum months." },
-  { title: "Category", detail: "Blocked categories are skipped; with an allow list, the category must be on it." },
-  { title: "Excluded keywords", detail: "Any excluded keyword in the title skips the lead." },
-  { title: "Keyword match", detail: "A keyword must match the title, with its own country, state, unit and minimum quantity." },
-  { title: "Retail", detail: "Below the retail quantity, or marked Retail by IndiaMART when retail leads are off." },
-  { title: "Daily limits", detail: `Each keyword's limit, then the business limit (never above ${HARD_DAILY_CAPTURE_LIMIT} a day).` }
-];
-function normalizeChannelContactMode(value) {
-  if (value === "available") {
-    return "available";
-  }
-  if (value === "verified" || value === "verified_only" || value === "required" || value === "available_and_verified") {
-    return "verified";
-  }
-  return "off";
-}
-function normalizeAnyContactMode(value) {
-  return value === "required" || value === "one_verified" || value === "one_available_one_verified" ? value : "off";
-}
-var SKIP_REASON_LABELS = {
-  country_not_allowed: "Country Not Matched",
-  contact_requirement_not_met: "Contact Not Matched",
-  negative_keyword_match: "Excluded Keyword",
-  no_positive_keyword_match: "Keyword Not Matched",
-  quantity_below_minimum: "Quantity Not Matched",
-  unit_mismatch: "Unit Not Matched",
-  retail_lead: "Retail Lead",
-  daily_limit_reached: "Daily Limit Reached",
-  keyword_daily_limit_reached: "Keyword Limit Reached",
-  invalid_title: "Unreadable Lead",
-  lead_too_old: "Lead Too Old",
-  state_not_allowed: "State Not Matched",
-  keyword_country_mismatch: "Keyword Country Not Matched",
-  keyword_state_mismatch: "Keyword State Not Matched",
-  gst_not_verified: "GST Not Verified",
-  buyer_too_new: "Buyer Too New",
-  category_not_allowed: "Category Not Matched",
-  indiamart_not_retrieved: "IndiaMART Side Lead Not Retrieved"
-};
-var BUSINESS_SKIP_REASON_OPTIONS = Object.entries(SKIP_REASON_LABELS).filter(([reason]) => reason !== "indiamart_not_retrieved");
-
-// src/fast-buy.ts
-var SAFETY_BRAKE_STEPS_MS = [2 * 6e4, 5 * 6e4, 15 * 6e4];
-var SAFETY_BRAKE_RESET_MS = 30 * 6e4;
-var MAX_SAFETY_BRAKE_MS = 60 * 6e4;
-var DEFAULT_BUY_RATE_LIMIT_COOLDOWN_SECONDS = SAFETY_BRAKE_STEPS_MS[0] / 1e3;
-function safetyBrakeActive(brake, now = Date.now()) {
-  return Boolean(brake && brake.until > now);
-}
-var SAFETY_BRAKE_STORAGE_KEY = "imSafetyBrake";
-var SAFETY_BRAKE_REASON_TEXT = {
-  list_rate_limited: "IndiaMART rate-limited the lead list",
-  buy_rate_limited: "IndiaMART rate-limited a buy",
-  list_activity_warning: "IndiaMART reported high activity",
-  page_list_rate_limited: "IndiaMART rate-limited the page's lead list",
-  indiamart_activity_warning: "IndiaMART showed a high-activity warning"
-};
-function safetyBrakeNotice(brake, now = Date.now()) {
-  if (!brake || !safetyBrakeActive(brake, now)) {
-    return null;
-  }
-  const resumes = new Date(brake.until).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  const why = SAFETY_BRAKE_REASON_TEXT[brake.reason] ?? "IndiaMART pushed back";
-  return `Paused for account safety: ${why}. Polling and buying resume at ${resumes}.`;
-}
-
 // src/popup.ts
 var MIN_DAILY_CAPTURE_LIMIT = 1;
-var MAX_DAILY_CAPTURE_LIMIT = HARD_DAILY_CAPTURE_LIMIT;
+var maxDailyCaptureLimit = DEFAULT_DAILY_CAPTURE_LIMIT;
 async function readLocalState() {
   const state = await chrome.storage.local.get([
     "selectedBusinessName",
@@ -273,9 +431,9 @@ function formatTimeZoneLabel(timeZone) {
 }
 function normalizeDailyCaptureLimit(limit) {
   if (!Number.isFinite(limit)) {
-    return MAX_DAILY_CAPTURE_LIMIT;
+    return maxDailyCaptureLimit;
   }
-  return Math.min(MAX_DAILY_CAPTURE_LIMIT, Math.max(MIN_DAILY_CAPTURE_LIMIT, Math.round(limit)));
+  return Math.min(maxDailyCaptureLimit, Math.max(MIN_DAILY_CAPTURE_LIMIT, Math.round(limit)));
 }
 var SERVER_UNREACHABLE_MESSAGE = `Cannot reach the server (${API_BASE_URL}). Captured leads are kept and sent once it is back.`;
 async function checkSession(authSession) {
@@ -418,7 +576,21 @@ function setLoginPending(isPending) {
   button.textContent = isPending ? "Logging in..." : "Login";
   status.textContent = isPending ? "Logging in... verifying with backend." : "";
 }
+var ACTIVE_TAB_STORAGE_KEY = "popupActiveTab";
+var activeTab = readStoredTab();
+function readStoredTab() {
+  try {
+    return window.localStorage.getItem(ACTIVE_TAB_STORAGE_KEY) === "rank" ? "rank" : "config";
+  } catch {
+    return "config";
+  }
+}
 function activateTab(tabName) {
+  activeTab = tabName;
+  try {
+    window.localStorage.setItem(ACTIVE_TAB_STORAGE_KEY, tabName);
+  } catch {
+  }
   document.querySelectorAll(".tab-button").forEach((button) => {
     const isActive = button.dataset.tab === tabName;
     button.classList.toggle("active", isActive);
@@ -517,6 +689,11 @@ function setContactModeControls(settings) {
 }
 function readDailyCaptureLimitFromControl() {
   return normalizeDailyCaptureLimit(Number(document.querySelector("#daily-capture-limit").value));
+}
+function setDailyCaptureLimitCap(cap) {
+  maxDailyCaptureLimit = cap ?? DEFAULT_DAILY_CAPTURE_LIMIT;
+  document.querySelector("#daily-capture-limit").max = String(maxDailyCaptureLimit);
+  document.querySelector("#daily-capture-limit-hint").textContent = `(1\u2013${maxDailyCaptureLimit})`;
 }
 function setDailyCaptureLimitControl(limit) {
   document.querySelector("#daily-capture-limit").value = String(normalizeDailyCaptureLimit(limit));
@@ -686,12 +863,14 @@ function applyFilterSettings(filterSettings) {
   if (filterSettings) {
     document.querySelector("#countries-summary").textContent = `${filterSettings.allowed_countries.length} countries selected`;
     setContactModeControls(filterSettings);
+    setDailyCaptureLimitCap(filterSettings.max_daily_capture_limit);
     setDailyCaptureLimitControl(filterSettings.daily_capture_limit);
     setIncludeRetailLeadsControl(filterSettings.include_retail_leads !== false);
     setTrustedBuyerBypassControl(filterSettings.trusted_buyer_bypass === true);
   } else {
     document.querySelector("#countries-summary").textContent = "Countries unavailable";
-    setDailyCaptureLimitControl(MAX_DAILY_CAPTURE_LIMIT);
+    setDailyCaptureLimitCap(void 0);
+    setDailyCaptureLimitControl(maxDailyCaptureLimit);
     setIncludeRetailLeadsControl(true);
     setTrustedBuyerBypassControl(false);
     paintContactHints();
@@ -794,7 +973,7 @@ async function renderPopup() {
   loginPanel.hidden = true;
   appPanel.hidden = false;
   headerAccount.hidden = false;
-  activateTab("config");
+  activateTab(activeTab);
   paintLocalState(state, state.businesses, billingOk);
   const [session, businesses, filterSettings] = await Promise.all([
     checkSession(state.authSession),
@@ -853,14 +1032,10 @@ document.querySelector("#login-panel")?.addEventListener("submit", async (event)
   }
 });
 document.querySelector("#open-activity-log")?.addEventListener("click", () => {
-  chrome.windows.getCurrent((window2) => {
-    if (window2.id === void 0) {
-      return;
-    }
-    void chrome.sidePanel.open({ windowId: window2.id }).then(() => globalThis.close());
-  });
+  openActivityPanel(activeTab === "rank" ? "rank" : "leads");
 });
 void renderPopup();
+initLeadRankTab();
 chrome.runtime.sendMessage({ type: "REFRESH_BILLING" }).catch(() => void 0);
 chrome.runtime.sendMessage({ type: "REFRESH_BOT_PRESENCE" }).catch(() => void 0);
 chrome.storage.onChanged.addListener((changes, area) => {
@@ -882,13 +1057,13 @@ chrome.storage.onChanged.addListener(async (changes) => {
 });
 var brakeNoticeTimer;
 function paintSafetyBrake(brake) {
-  const element = document.querySelector("#safety-brake");
-  if (!element) {
+  const element2 = document.querySelector("#safety-brake");
+  if (!element2) {
     return;
   }
   const notice = safetyBrakeNotice(brake);
-  element.hidden = !notice;
-  element.textContent = notice ?? "";
+  element2.hidden = !notice;
+  element2.textContent = notice ?? "";
   window.clearTimeout(brakeNoticeTimer);
   if (notice && brake) {
     brakeNoticeTimer = window.setTimeout(() => paintSafetyBrake(brake), Math.max(1e3, brake.until - Date.now() + 500));

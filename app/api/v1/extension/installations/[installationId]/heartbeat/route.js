@@ -1,7 +1,7 @@
 import { db, now } from "@/lib/server/db";
 import { route } from "@/lib/server/http";
 
-export const POST = route(async (request, { installationId }) => {
+const handleHeartbeat = async (request, { installationId }) => {
   const ts = now();
   const inst = db
     .prepare("SELECT business_id FROM extension_installations WHERE id = ?")
@@ -13,5 +13,7 @@ export const POST = route(async (request, { installationId }) => {
   }
 
   return Response.json({ ok: true, timestamp: ts });
-});
+};
 
+export const POST = route(handleHeartbeat);
+export const PATCH = route(handleHeartbeat);

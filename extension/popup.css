@@ -412,7 +412,8 @@ main > .popup-content {
   color: #c0263b;
 }
 
-#bot-toggle {
+#bot-toggle,
+#interest-toggle {
   background: var(--brand-gradient);
   border: 1px solid #4338ca;
   border-radius: 999px;
@@ -426,16 +427,19 @@ main > .popup-content {
   white-space: nowrap;
 }
 
-#bot-toggle:hover {
+#bot-toggle:hover,
+#interest-toggle:hover {
   filter: brightness(1.08);
   transform: translateY(-1px);
 }
 
-#bot-toggle:active {
+#bot-toggle:active,
+#interest-toggle:active {
   transform: translateY(0);
 }
 
-#bot-toggle.stopped {
+#bot-toggle.stopped,
+#interest-toggle.stopped {
   background: var(--surface-2);
   border-color: var(--border);
   box-shadow: none;
@@ -610,9 +614,9 @@ button:disabled {
 
 .summary-row em {
   background: var(--accent-soft);
-  border: 1px solid #c7cbfa;
+  border: 1px solid rgba(217, 67, 43, 0.35);
   border-radius: 999px;
-  color: var(--accent);
+  color: var(--accent-text);
   font-style: normal;
   font-size: 11px;
   font-weight: 700;
@@ -950,4 +954,176 @@ select:disabled {
     border-color: #8a5a1c;
     color: #f5c27a;
   }
+}
+
+/* Lead Rank tab: expired-lead interest */
+.rank-head {
+  align-items: flex-start;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+}
+
+.rank-head h2 {
+  margin: 0;
+}
+
+.rank-help,
+.rank-scan,
+.rank-empty {
+  color: var(--text-muted);
+  font-size: 11px;
+  margin: 2px 0 0;
+}
+
+.rank-status {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+  margin: 0;
+}
+
+.rank-status[data-tone="ok"] {
+  color: #1d7a3e;
+}
+
+.rank-status[data-tone="warn"] {
+  color: var(--accent-text);
+}
+
+.rank-error {
+  color: var(--danger);
+  font-size: 11px;
+  margin: 0;
+}
+
+#interest-toggle {
+  background: var(--gold-gradient);
+  border: 1px solid var(--gold);
+  border-radius: 999px;
+  color: var(--night);
+  flex-shrink: 0;
+  font-size: 12px;
+  min-height: 30px;
+  padding: 5px 14px;
+}
+
+#interest-toggle.stopped {
+  background: var(--surface-2);
+  border-color: var(--border);
+  color: var(--text);
+}
+
+.rank-stats {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: 1fr 1fr;
+}
+
+.rank-stats > div {
+  background: var(--bg-1);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  display: grid;
+  padding: 8px 10px;
+}
+
+.rank-stats em {
+  font-size: 18px;
+  font-style: normal;
+  font-variant-numeric: tabular-nums;
+  font-weight: 800;
+}
+
+.rank-stats span {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.link-button {
+  background: transparent;
+  color: var(--accent-text);
+  font-size: 11px;
+  padding: 2px 4px;
+}
+
+.rank-log {
+  display: grid;
+  gap: 6px;
+  list-style: none;
+  margin: 0;
+  max-height: 260px;
+  overflow-y: auto;
+  padding: 0;
+}
+
+.rank-log li {
+  background: var(--bg-1);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  display: grid;
+  gap: 3px;
+  padding: 7px 9px;
+}
+
+.rank-log strong {
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.rank-log .rank-meta {
+  color: var(--text-muted);
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 11px;
+  gap: 6px;
+}
+
+.rank-badge {
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 7px;
+}
+
+.rank-badge[data-status="interested"] {
+  background: #e3f4e8;
+  color: #1d7a3e;
+}
+
+.rank-badge[data-status="already"] {
+  background: var(--surface-2);
+  color: var(--text-muted);
+}
+
+.rank-badge[data-status="failed"] {
+  background: var(--live-bg);
+  color: var(--danger);
+}
+
+@media (prefers-color-scheme: dark) {
+  .rank-status[data-tone="ok"],
+  .rank-badge[data-status="interested"] {
+    color: #7fd39a;
+  }
+
+  .rank-badge[data-status="interested"] {
+    background: rgb(127 211 154 / 14%);
+  }
+}
+
+.beta-badge {
+  background: var(--gold-gradient);
+  border: 1px solid var(--gold);
+  border-radius: 999px;
+  color: var(--night);
+  display: inline-block;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  line-height: 1;
+  margin-left: 4px;
+  padding: 2px 5px;
+  text-transform: uppercase;
+  vertical-align: middle;
 }
