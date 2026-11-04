@@ -1,0 +1,92 @@
+@import "tailwindcss";
+
+/* Hi-San Bot design tokens. Change colors here; every page uses these. */
+@theme {
+  --font-sans: Arial, Helvetica, sans-serif;
+
+  --color-bg: #f4f6fb;
+  --color-surface: #fff;
+  --color-surface-muted: #eef1f8;
+  --color-surface-soft: #f8f9fd;
+  --color-border: #dfe4f0;
+  --color-border-strong: #b4bdd3;
+  --color-text: #141b34;
+  --color-muted: #5b6480;
+  --color-accent: #4f46e5;
+  --color-accent-dark: #4338ca;
+  --color-accent-hover: #3730a3;
+  --color-accent-soft: #eef0ff;
+  --color-accent-border: #c7cbfa;
+  --color-accent-ring: #4f46e529;
+  --color-gold: #f59e0b;
+  --color-gold-text: #92400e;
+  --color-night: #0b1023;
+  --color-warning-bg: #fff7e0;
+  --color-warning-border: #f6d58a;
+  --color-danger: #c0263b;
+  --color-danger-bg: #fdecee;
+  --color-danger-border: #f5b8c1;
+  --color-success: #13795b;
+  --color-success-bg: #e3f7ee;
+  --color-success-border: #9fdcc1;
+  --color-verified: #1d5fbf;
+  --color-verified-bg: #e3eeff;
+  --color-verified-border: #a8c6f2;
+
+  --shadow-card: 0 8px 22px #141b3414;
+  --shadow-popup: 0 20px 50px #141b341a;
+  --shadow-button: 0 8px 22px #4f46e53d;
+  --shadow-modal: 0 24px 70px #141b3429;
+  --shadow-dropdown: 0 14px 30px #141b341f;
+  --shadow-segment: 0 1px 3px #141b341f;
+
+  --animate-shimmer: skeleton-shimmer 1.4s infinite;
+
+  @keyframes skeleton-shimmer {
+    0% { background-position: 100% 0; }
+    100% { background-position: 0 0; }
+  }
+}
+
+:root {
+  color-scheme: light;
+  --success-gradient: linear-gradient(180deg, #c9f5e1 0%, #6fd6a8 100%);
+  --brand-gradient: linear-gradient(135deg, #22d3ee 0%, #4f46e5 100%);
+}
+
+@layer base {
+  /* The original relies on the browser's default line-height, not preflight's 1.5 */
+  html {
+    line-height: normal;
+  }
+  body {
+    @apply m-0 bg-bg font-sans text-text;
+  }
+  a {
+    color: inherit;
+    text-decoration: none;
+  }
+  button:not(:disabled) {
+    cursor: pointer;
+  }
+  :focus-visible {
+    outline: 3px solid var(--color-gold);
+    outline-offset: 2px;
+  }
+  ::selection {
+    background: var(--color-accent-soft);
+    color: var(--color-text);
+  }
+  td {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  :before,
+  :after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
+}

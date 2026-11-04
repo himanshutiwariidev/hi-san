@@ -1,0 +1,20 @@
+{
+  "name": "hisan-bot",
+  "version": "1.0.8",
+  "private": true,
+  "scripts": {
+    "dev": "NODE_OPTIONS=--disable-warning=ExperimentalWarning next dev",
+    "build": "NODE_OPTIONS=--disable-warning=ExperimentalWarning next build",
+    "start": "NODE_OPTIONS=--disable-warning=ExperimentalWarning next start"
+  },
+  "dependencies": {
+    "next": "^16.4.3",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.3.3",
+    "postcss": "^8.5.32",
+    "tailwindcss": "^4.3.3"
+  }
+}
