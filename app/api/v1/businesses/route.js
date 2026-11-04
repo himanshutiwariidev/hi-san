@@ -1,4 +1,4 @@
-import { db } from "@/lib/server/db";
+import { db, now } from "@/lib/server/db";
 import { accessibleBusinesses, requireAdmin, requireUser } from "@/lib/server/auth";
 import { createBusiness } from "@/lib/server/businesses";
 import { readJson, requireString, route } from "@/lib/server/http";
@@ -15,6 +15,9 @@ export const POST = route(async (request) => {
   const user = await requireUser();
   requireAdmin(user);
   const body = await readJson(request);
+  if (user.id === "admin") {
+    db.prepare("INSERT OR IGNORE INTO tenants (id, name, created_at) VALUES ('admin', 'Main Organization', ?)").run(now());
+  }
   const business = createBusiness(user.tenant_id, requireString(body.name, "Business name", { max: 120 }));
   return Response.json(businessOut(business, { leads_this_month: 0 }), { status: 201 });
 });

@@ -1,7 +1,7 @@
 "use client";
 
 import { Suspense, useCallback, useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import Sidebar from "@/components/Sidebar";
 import { AppContext } from "@/components/AppContext";
 import { TextButton } from "@/components/ui/buttons";
@@ -10,6 +10,7 @@ import { readSelectedBusinessId, saveSelectedBusinessId } from "@/lib/session";
 
 export default function AppShell({ children }) {
   const router = useRouter();
+  const pathname = usePathname();
   const [me, setMe] = useState(null);
   const [businesses, setBusinesses] = useState(null);
   const [businessId, setBusinessId] = useState(null);
@@ -78,7 +79,7 @@ export default function AppShell({ children }) {
             </div>
           </header>
           <main className="grid gap-[22px] p-7 max-[760px]:p-4 [&>*]:min-w-0">
-            {business ? (
+            {business || pathname === "/businesses" || pathname === "/profile" ? (
               children
             ) : (
               <div className="rounded-lg border border-border bg-surface p-7 text-muted">
