@@ -16,3 +16,4 @@ export const POST = route(async (request) => {
 
   return Response.json({ id, business_id: businessId });
 });
+

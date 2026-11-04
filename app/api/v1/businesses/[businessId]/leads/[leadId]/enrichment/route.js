@@ -62,3 +62,4 @@ export const PATCH = route(async (request, { businessId, leadId }) => {
 
   return Response.json(leadOut(updated));
 });
+

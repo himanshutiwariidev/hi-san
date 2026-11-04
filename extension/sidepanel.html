@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Activity Log</title>
+    <link rel="stylesheet" href="sidepanel.css" />
+  </head>
+  <body>
+    <header class="log-header">
+      <div class="log-title">
+        <img src="icons/hisan-mark.svg" alt="Hi-San Bot" width="28" height="28" />
+        <div>
+          <h1>Activity log</h1>
+          <p id="log-business">-</p>
+        </div>
+      </div>
+      <p class="log-live" id="log-updated" title="Refreshes by itself whenever a lead is decided, synced or bought">
+        <span class="live-dot" aria-hidden="true"></span><span id="log-updated-text">Loading…</span>
+      </p>
+    </header>
+    <p id="log-brake" class="log-brake" role="status" hidden></p>
+
+    <nav class="log-filters" aria-label="Show">
+      <button type="button" class="log-filter active" data-filter="all" aria-pressed="true">
+        All <em id="count-all">0</em>
+      </button>
+      <button type="button" class="log-filter" data-filter="captured" aria-pressed="false">
+        Captured <em id="count-captured">0</em>
+      </button>
+      <button type="button" class="log-filter" data-filter="filtered" aria-pressed="false">
+        Filtered <em id="count-filtered">0</em>
+      </button>
+      <button type="button" class="log-filter" data-filter="unsynced" aria-pressed="false">
+        Not synced <em id="count-unsynced">0</em>
+      </button>
+    </nav>
+
+    <div class="log-tools">
+      <input id="log-search" type="search" placeholder="Search title, country, reason, buyer…" autocomplete="off" />
+      <div id="reason-breakdown" class="reason-breakdown" hidden></div>
+    </div>
+
+    <main id="log-list" class="log-list" aria-live="polite"></main>
+
+    <div id="log-empty" class="log-empty" hidden>
+      <strong id="log-empty-title">No leads yet</strong>
+      <p id="log-empty-text">Leads appear here the moment the bot decides on them on an IndiaMART BuyLead page.</p>
+    </div>
+
+    <script type="module" src="sidepanel.js"></script>
+  </body>
+</html>

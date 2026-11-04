@@ -123,8 +123,20 @@ export default function ExtensionPage() {
           <h2 className="m-0 text-lg font-bold">Setup</h2>
           <ol className="m-0 grid list-none gap-4 p-0">
             <Step n={1} title="Install the extension in Chrome">
-              Open <code className="rounded bg-surface-muted px-1">chrome://extensions</code>, turn on <strong>Developer mode</strong>, click <strong>Load unpacked</strong>, and pick the{" "}
-              <code className="rounded bg-surface-muted px-1">extension</code> folder from this project.
+              <div className="mb-2">
+                <a
+                  href="/hi-san-bot-extension.zip"
+                  download="hi-san-bot-extension.zip"
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-accent px-3 py-1.5 text-xs font-bold text-white shadow-sm hover:bg-accent-hover transition-colors"
+                >
+                  <svg viewBox="0 0 20 20" fill="currentColor" className="size-3.5">
+                    <path d="M10.75 2.75a.75.75 0 00-1.5 0v8.614L6.295 8.235a.75.75 0 10-1.09 1.03l4.25 4.5a.75.75 0 001.09 0l4.25-4.5a.75.75 0 00-1.09-1.03l-2.955 3.129V2.75z" />
+                    <path d="M3.5 12.75a.75.75 0 00-1.5 0v2.5A2.75 2.75 0 004.75 18h10.5A2.75 2.75 0 0018 15.25v-2.5a.75.75 0 00-1.5 0v2.5c0 .69-.56 1.25-1.25 1.25H4.75c-.69 0-1.25-.56-1.25-1.25v-2.5z" />
+                  </svg>
+                  Download Extension (.zip)
+                </a>
+              </div>
+              Extract the zip, open <code className="rounded bg-surface-muted px-1">chrome://extensions</code>, turn on <strong>Developer mode</strong>, click <strong>Load unpacked</strong>, and select the extracted folder.
             </Step>
             <Step n={2} title="Connect it">
               In the extension&apos;s settings, paste the dashboard URL and API key from this page, then press <strong>Save and test connection</strong>.

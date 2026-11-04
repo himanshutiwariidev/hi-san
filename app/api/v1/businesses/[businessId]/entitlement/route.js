@@ -23,3 +23,4 @@ export const GET = route(async (_request, { businessId }) => {
     received_at: now,
   });
 });
+

@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Hi-San Bot</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main>
+      <header class="popup-header">
+        <div class="popup-brand">
+          <div class="brand-left">
+            <img class="brand-mark" src="icons/hisan-mark.svg" alt="Hi-San Bot" width="34" height="34" />
+            <div class="brand-text">
+              <h1>Hi-San Bot</h1>
+              <span id="app-version">v1.0.8</span>
+            </div>
+          </div>
+          <div class="header-account" id="header-account" hidden>
+            <span id="profile-user" class="profile-username">-</span>
+            <button id="logout" class="icon-button logout-button" type="button" aria-label="Logout" title="Logout">
+              <svg viewBox="0 0 20 20" width="15" height="15" aria-hidden="true">
+                <path
+                  d="M7.5 17.5h-3A1.5 1.5 0 0 1 3 16V4a1.5 1.5 0 0 1 1.5-1.5h3M13.5 14l4-4-4-4M17 10H7.5"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.5"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+              </svg>
+            </button>
+          </div>
+        </div>
+        <details class="account-strip" id="account-strip" hidden>
+          <summary>
+            <span class="account-chip" id="account-state" data-tone="muted">Checking</span>
+            <span class="account-summary" id="account-summary">Checking plan…</span>
+            <svg class="account-chevron" viewBox="0 0 10 6" width="10" height="6" aria-hidden="true">
+              <path d="M1 1l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+          </summary>
+          <dl class="account-grid">
+            <div><dt>Plan</dt><dd id="account-plan">-</dd></div>
+            <div><dt>Plan price</dt><dd id="account-price">-</dd></div>
+            <div><dt>Plan due</dt><dd id="account-plan-due">-</dd></div>
+            <div><dt>Trial due</dt><dd id="account-trial-due">-</dd></div>
+            <div><dt>Status</dt><dd><span class="account-chip" id="account-status" data-tone="muted">-</span></dd></div>
+            <div><dt>Business</dt><dd><span class="account-chip" id="account-business" data-tone="muted">-</span></dd></div>
+          </dl>
+        </details>
+        <div class="bot-controls">
+          <div class="bot-state">
+            <strong id="bot-status" data-tone="idle">Idle</strong>
+            <span id="bot-presence-detail"></span>
+          </div>
+          <button id="bot-toggle" type="button">Start Bot</button>
+        </div>
+        <p id="safety-brake" class="safety-brake" role="status" hidden></p>
+      </header>
+      <div class="popup-content">
+        <form id="login-panel">
+          <label>
+            <span>Email</span>
+            <input id="email" type="email" autocomplete="email" required placeholder="you@company.com" />
+          </label>
+          <label>
+            <span>Password</span>
+            <input id="password" type="password" autocomplete="current-password" required placeholder="••••••••" />
+          </label>
+          <button id="login" type="submit">Login</button>
+          <div class="login-feedback" aria-live="polite">
+            <p id="login-status"></p>
+            <p id="login-error"></p>
+          </div>
+        </form>
+        <section id="app-panel" hidden>
+          <nav class="tabs" aria-label="Extension sections">
+            <button class="tab-button active" type="button" data-tab="config" aria-selected="true">Config</button>
+            <button class="tab-button" type="button" data-tab="rank" aria-selected="false">Lead Rank</button>
+          </nav>
+          <section class="tab-panel" id="tab-config">
+            <section class="setting-group" aria-labelledby="targeting-title">
+              <h2 id="targeting-title">Targeting</h2>
+              <label class="field-label" for="business-select">Business</label>
+              <select id="business-select">
+                <option>Businesses loading...</option>
+              </select>
+
+              <label class="field-label" for="countries-select">Countries</label>
+              <select id="countries-select">
+                <option id="countries-summary">Countries loading...</option>
+              </select>
+
+              <div class="summary-list">
+                <button class="summary-row" type="button">
+                  <span class="summary-row-label">
+                    <span class="summary-chevron" aria-hidden="true">&gt;</span>
+                    <strong>Positive Keywords</strong>
+                  </span>
+                  <em id="positive-keywords-count">0</em>
+                </button>
+                <button class="summary-row" type="button">
+                  <span class="summary-row-label">
+                    <span class="summary-chevron" aria-hidden="true">&gt;</span>
+                    <strong>Negative Keywords</strong>
+                  </span>
+                  <em id="negative-keywords-count">0</em>
+                </button>
+              </div>
+            </section>
+
+            <section class="setting-group" aria-labelledby="contact-filter-title">
+              <h2 id="contact-filter-title">Contact Filters</h2>
+              <details class="filter-guide">
+                <summary>How filtering works</summary>
+                <p>Every lead goes through these checks in order. The first one it fails is why it was filtered.</p>
+                <ol id="filter-check-order"></ol>
+                <p>
+                  <strong>Contact:</strong> Email is checked, then Phone, then Any Contact decides how the two combine.
+                  "Verified" always means IndiaMART's own verified flag.
+                </p>
+              </details>
+
+              <label class="field-label" for="email-mode">Email</label>
+              <select id="email-mode" data-hint="email-mode-hint"></select>
+              <p class="contact-hint" id="email-mode-hint"></p>
+
+              <label class="field-label" for="phone-mode">Phone / WhatsApp</label>
+              <select id="phone-mode" data-hint="phone-mode-hint"></select>
+              <p class="contact-hint" id="phone-mode-hint"></p>
+
+              <label class="field-label" for="any-contact-mode">Any Contact</label>
+              <select id="any-contact-mode" data-hint="any-contact-mode-hint"></select>
+              <p class="contact-hint" id="any-contact-mode-hint"></p>
+            </section>
+
+            <section class="setting-group" aria-labelledby="lead-filter-title">
+              <h2 id="lead-filter-title">Lead Filters</h2>
+              <label class="checkbox-label">
+                <input id="include-retail-leads" type="checkbox" />
+                <span class="checkbox-box" aria-hidden="true"></span>
+                <span>Include Retail Leads</span>
+              </label>
+              <label class="checkbox-label" title="Buyers on IndiaMART 1+ years with any email or phone shown or verified pass the contact settings above. Country, keywords and every other filter still apply.">
+                <input id="trusted-buyer-bypass" type="checkbox" />
+                <span class="checkbox-box" aria-hidden="true"></span>
+                <span>Trusted buyers (1+ year, any contact) skip contact filter</span>
+              </label>
+            </section>
+
+            <section class="setting-group" aria-labelledby="capture-title">
+              <h2 id="capture-title">Capture</h2>
+              <label class="field-label" for="daily-capture-limit">Daily capture limit <span class="field-hint">(1–10)</span></label>
+              <input id="daily-capture-limit" type="number" min="1" max="10" step="1" value="10" />
+            </section>
+
+            <button id="save-sync" type="button">Save &amp; Sync</button>
+
+            <dl class="stats-list">
+              <div>
+                <dt>Captured today</dt>
+                <dd id="captured-count">0</dd>
+              </div>
+              <div>
+                <dt>Skipped today</dt>
+                <dd id="skipped-count">0</dd>
+              </div>
+              <div>
+                <dt>Last sync</dt>
+                <dd id="last-sync">Never</dd>
+              </div>
+            </dl>
+            <p id="sync-error"></p>
+            <p id="notice">Lead capture is active on IndiaMART pages while you are logged in.</p>
+          </section>
+          <div class="visually-hidden" aria-hidden="true">
+            <span id="profile-email">-</span>
+            <span id="business">Not bound</span>
+          </div>
+          <section class="tab-panel" id="tab-rank" hidden>
+            <div class="empty-panel">
+              <strong>Lead Rank</strong>
+              <p>Lead ranking will appear here after scoring rules are connected.</p>
+            </div>
+          </section>
+        </section>
+      </div>
+      <footer class="popup-footer">
+        <button id="open-activity-log" class="secondary" type="button">
+          <svg viewBox="0 0 20 20" width="15" height="15" aria-hidden="true">
+            <path
+              d="M4 5h12M4 10h12M4 15h7"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.6"
+              stroke-linecap="round"
+            />
+          </svg>
+          Activity log
+        </button>
+      </footer>
+    </main>
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

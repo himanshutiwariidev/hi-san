@@ -26,3 +26,4 @@ export const GET = route(async (request, { businessId }) => {
     last_seen: ts,
   });
 });
+

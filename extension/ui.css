@@ -1,0 +1,23 @@
+:root { --bg:#f4f6fb; --surface:#fff; --muted-bg:#eef1f8; --border:#dfe4f0; --text:#141b34; --muted:#5b6480; --accent:#4f46e5; --accent-dark:#4338ca; --accent-soft:#eef0ff; --accent-border:#c7cbfa; --accent-hover:#3730a3; --success:#13795b; --success-bg:#e3f7ee; --danger:#c0263b; --danger-bg:#fdecee; --gold-text:#92400e; --warning-bg:#fff7e0; }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.4 Arial, Helvetica, sans-serif; }
+h1 { margin: 0; font-size: 18px; }
+h2 { margin: 0 0 8px; font-size: 14px; }
+p { margin: 0; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 14px; }
+.muted { color: var(--muted); font-size: 12px; }
+label.field { display: grid; gap: 6px; }
+label.field span { color: var(--muted); font-size: 12px; }
+input[type=text], input[type=url], input[type=number], input[type=password] { width: 100%; border: 1px solid var(--border); border-radius: 10px; padding: 9px 10px; font: inherit; color: var(--text); background: #fff; }
+.toggle { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.btn { border: 0; border-radius: 10px; padding: 9px 12px; font: inherit; font-weight: 700; cursor: pointer; background: var(--accent); color: #fff; }
+.btn:hover { background: var(--accent-hover); }
+.btn.secondary { background: #fff; color: var(--accent-dark); border: 1px solid var(--accent-border); }
+.btn.secondary:hover { background: var(--accent-soft); }
+.pill { display: inline-block; border-radius: 999px; padding: 3px 8px; font-size: 11px; font-weight: 700; }
+.pill.buy { background: var(--success-bg); color: var(--success); }
+.pill.skip { background: var(--muted-bg); color: var(--muted); }
+.pill.error { background: var(--danger-bg); color: var(--danger); }
+.pill.warn { background: var(--warning-bg); color: var(--gold-text); }
+.ok { color: var(--success); }
+.err { color: var(--danger); }

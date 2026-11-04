@@ -7,3 +7,4 @@ export const PATCH = route(async (request, { businessId }) => {
   await readJson(request);
   return Response.json({ ok: true });
 });
+

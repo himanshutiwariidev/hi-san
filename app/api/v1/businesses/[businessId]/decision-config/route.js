@@ -82,3 +82,4 @@ export const GET = route(async (_request, { businessId }) => {
     keyword_rules: keywordRules,
   });
 });
+

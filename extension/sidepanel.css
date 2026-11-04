@@ -1,0 +1,388 @@
+* {
+  box-sizing: border-box;
+}
+
+:root {
+  /* Hi-San Bot brand tokens matching CRM */
+  --bg-0: #f4f6fb;
+  --bg-1: #ffffff;
+  --surface: #ffffff;
+  --surface-2: #f8f9fd;
+  --surface-hover: #eef1f8;
+  --border: #dfe4f0;
+  --border-soft: #eaedf5;
+  --border-strong: #b4bdd3;
+  --text: #141b34;
+  --text-muted: #5b6480;
+  --text-faint: #8a94a6;
+  --accent: #4f46e5;
+  --accent-soft: #eef0ff;
+  --ok: #13795b;
+  --ok-soft: #e3f7ee;
+  --warn: #92400e;
+  --warn-soft: #fff7e0;
+  --bad: #c0263b;
+  --bad-soft: #fdecee;
+  --wait: #4f46e5;
+  --wait-soft: #eef0ff;
+  --radius-md: 10px;
+  --radius-sm: 8px;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+body {
+  background: var(--bg-0);
+  color: var(--text);
+  font-family: "Segoe UI", -apple-system, BlinkMacSystemFont, Inter, Roboto, Helvetica, Arial, sans-serif;
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+}
+
+.log-header {
+  align-items: center;
+  background: var(--bg-0);
+  border-bottom: 1px solid var(--border-soft);
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+  padding: 14px 14px 12px;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+
+.log-title {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  min-width: 0;
+}
+
+.log-title img {
+  flex: 0 0 28px;
+}
+
+h1 {
+  font-size: 15px;
+  font-weight: 700;
+  margin: 0;
+}
+
+#log-business {
+  color: var(--text-muted);
+  font-size: 11.5px;
+  margin: 1px 0 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.log-live {
+  align-items: center;
+  color: var(--text-muted);
+  display: flex;
+  flex: 0 0 auto;
+  font-size: 11px;
+  gap: 6px;
+  margin: 0;
+}
+
+.live-dot {
+  animation: pulse 2s ease-in-out infinite;
+  background: var(--ok);
+  border-radius: 50%;
+  height: 7px;
+  width: 7px;
+}
+
+@keyframes pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.log-filters {
+  display: grid;
+  gap: 6px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  padding: 12px 14px 0;
+}
+
+.log-filter {
+  align-items: center;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-muted);
+  cursor: pointer;
+  display: flex;
+  font: inherit;
+  font-size: 11.5px;
+  font-weight: 700;
+  gap: 5px;
+  justify-content: center;
+  min-height: 30px;
+  padding: 4px 6px;
+  white-space: nowrap;
+}
+
+.log-filter em {
+  background: var(--surface-2);
+  border-radius: 999px;
+  color: var(--text);
+  font-style: normal;
+  font-variant-numeric: tabular-nums;
+  padding: 1px 6px;
+}
+
+.log-filter:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.log-filter.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.log-filter.active em {
+  background: rgb(255 255 255 / 22%);
+  color: #fff;
+}
+
+.log-tools {
+  display: grid;
+  gap: 8px;
+  padding: 10px 14px 4px;
+}
+
+#log-search {
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font: inherit;
+  min-height: 34px;
+  padding: 6px 10px;
+  width: 100%;
+}
+
+#log-search:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+  outline: none;
+}
+
+.reason-breakdown {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.reason-chip {
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+  padding: 3px 9px;
+}
+
+.reason-chip.active {
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.log-list {
+  display: grid;
+  gap: 8px;
+  padding: 8px 14px 18px;
+}
+
+.lead-row {
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+}
+
+.lead-row.captured {
+  border-left-color: var(--ok);
+}
+
+.lead-row.filtered {
+  border-left-color: var(--text-faint);
+}
+
+.lead-top {
+  align-items: flex-start;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.lead-title {
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.3;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.lead-time {
+  color: var(--text-faint);
+  flex: 0 0 auto;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.lead-meta {
+  color: var(--text-muted);
+  font-size: 11.5px;
+  margin: 0;
+}
+
+.lead-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.badge {
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+}
+
+.badge.ok {
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+
+.badge.muted {
+  background: var(--surface-2);
+  color: var(--text-muted);
+}
+
+.badge.warn {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+.badge.bad {
+  background: var(--bad-soft);
+  color: var(--bad);
+}
+
+.badge.wait {
+  background: var(--wait-soft);
+  color: var(--wait);
+}
+
+.lead-contact {
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  display: grid;
+  font-size: 11.5px;
+  gap: 2px;
+  padding: 6px 8px;
+}
+
+.lead-contact strong {
+  font-size: 11.5px;
+}
+
+.lead-contact span {
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.lead-source {
+  color: var(--text-muted);
+  display: grid;
+  font-size: 11px;
+  gap: 2px;
+}
+
+.lead-source span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lead-source a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.lead-source a:hover {
+  text-decoration: underline;
+}
+
+.lead-offer {
+  font-variant-numeric: tabular-nums;
+}
+
+.lead-error {
+  color: var(--bad);
+  font-size: 11px;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.log-empty {
+  color: var(--text-muted);
+  display: grid;
+  gap: 6px;
+  justify-items: center;
+  margin: 24px 14px;
+  text-align: center;
+}
+
+.log-empty strong {
+  color: var(--text);
+}
+
+.log-empty p {
+  line-height: 1.45;
+  margin: 0;
+}
+
+.safety-brake,
+.log-brake {
+  background: #fff4e5;
+  border: 1px solid #f0b46b;
+  border-radius: 8px;
+  color: #8a4b00;
+  font-size: 12px;
+  line-height: 1.4;
+  margin: 8px 0 0;
+  padding: 6px 10px;
+}
+
+@media (prefers-color-scheme: dark) {
+  .safety-brake,
+  .log-brake {
+    background: #3a2a12;
+    border-color: #8a5a1c;
+    color: #f5c27a;
+  }
+}

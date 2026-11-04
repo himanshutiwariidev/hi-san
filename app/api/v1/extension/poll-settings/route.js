@@ -15,3 +15,4 @@ export const GET = route(async () => {
     buy_requests_per_minute: 12,
   });
 });
+

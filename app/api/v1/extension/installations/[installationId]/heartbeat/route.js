@@ -14,3 +14,4 @@ export const POST = route(async (request, { installationId }) => {
 
   return Response.json({ ok: true, timestamp: ts });
 });
+

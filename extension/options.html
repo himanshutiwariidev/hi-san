@@ -1,0 +1,45 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Hi-San Bot extension settings</title>
+    <link rel="stylesheet" href="ui.css" />
+    <style>
+      body { padding: 32px 16px; }
+      main { max-width: 560px; margin: 0 auto; display: grid; gap: 16px; }
+      form { display: grid; gap: 14px; }
+      .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+      details summary { cursor: pointer; font-weight: 700; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="row"><img src="icons/128.png" width="40" height="40" alt="" /><h1>Hi-San Bot extension settings</h1></div>
+      <form id="form" class="card">
+        <label class="field"><span>Dashboard URL</span><input type="url" id="serverUrl" required placeholder="http://localhost:3000" /></label>
+        <label class="field"><span>API key (Dashboard → Extension)</span><input type="password" id="apiKey" required placeholder="hsb_…" autocomplete="off" /></label>
+        <label class="field"><span>Re-scan every (seconds, minimum 30)</span><input type="number" id="intervalSeconds" min="30" max="3600" required /></label>
+        <details>
+          <summary>Advanced</summary>
+          <label class="field" style="margin-top: 10px">
+            <span>Lead card CSS selector (leave empty to detect automatically from the “Contact Buyer Now” buttons)</span>
+            <input type="text" id="cardSelector" placeholder="e.g. .bl_grid" />
+          </label>
+        </details>
+        <div class="row">
+          <button class="btn" type="submit">Save and test connection</button>
+          <span id="result" class="muted"></span>
+        </div>
+      </form>
+      <div class="card">
+        <h2>How it works</h2>
+        <p class="muted">
+          Keep the IndiaMART BuyLeads page open while logged in to your seller account. The extension reads each lead, asks your
+          Hi-San Bot dashboard whether it matches your keywords and filters, and clicks “Contact Buyer Now” on matches.
+          Start with <strong>Dry run</strong> on and check the popup to confirm leads are read correctly before letting it buy.
+        </p>
+      </div>
+    </main>
+    <script src="options.js"></script>
+  </body>
+</html>
