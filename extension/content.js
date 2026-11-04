@@ -1,10 +1,18 @@
-// Runs on seller.indiamart.com.
-// - On the BuyLeads page (/bltxn): reads lead cards, asks the Hi-San Bot server which to buy,
-//   clicks "Contact Buyer Now" on those, and reports the buyer contacts back.
-// - On any other IndiaMART page: if a purchase just redirected here, reads the contacts and reports them.
+// Hi-San Bot - IndiaMART BuyLead Auto-Buy Engine
+// Fast sub-millisecond lead detection via WebSocketChannel + Dexie-compatible IndexedDB Outbox
 (() => {
   if (window.__hisanLoaded) return;
   window.__hisanLoaded = true;
+
+  // ---------- Configuration & Constants ----------
+  const REALTIME_CHANNEL_NAME = "WebSocketChannel";
+  const REALTIME_RESOURCES = new Set(["realtime_bl", "realtime_bl_new"]);
+  const OUTBOX_DB_NAME = "im_leads_outbox";
+  const OUTBOX_DB_VERSION = 2;
+  const XMPP_CONNECTION_DATA_KEY = "xmppConnectionData";
+  const XMPP_MINUTE_LIMIT = 15;
+  const SENT_KEY_TTL_MS = 24 * 60 * 60 * 1000;
+  const PENDING_TTL = 2 * 60 * 1000;
 
   const BUY_TEXT = /^\s*contact\s+buyer(\s+now)?\s*$/i;
   const CONFIRM_TEXT = /^\s*(yes|confirm|ok|okay|continue|proceed|contact buyer now|buy now)\s*$/i;
@@ -13,33 +21,426 @@
   const EMAIL = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
   const PHONE = /(?:\+?\d{1,3}[\s-]?)?(?:\d[\s-]?){9,12}\d/g;
   const hasContact = (text) => new RegExp(EMAIL.source, "i").test(text) || new RegExp(PHONE.source).test(text);
-  const PENDING_TTL = 2 * 60 * 1000;
 
   const COUNTRIES = self.HISAN_COUNTRIES ?? [];
-  const COUNTRY_ALIASES = { USA: "United States", "U.S.A": "United States", UAE: "United Arab Emirates", "U.A.E": "United Arab Emirates", UK: "United Kingdom" };
+  const COUNTRY_ALIASES = {
+    USA: "United States",
+    "U.S.A": "United States",
+    UAE: "United Arab Emirates",
+    "U.A.E": "United Arab Emirates",
+    UK: "United Kingdom",
+  };
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const jitter = (ms) => ms * (0.8 + Math.random() * 0.4);
-  const send = (message) => chrome.runtime.sendMessage(message);
+  const send = (message) => chrome.runtime.sendMessage(message).catch(() => null);
   const textOf = (el) => (el?.innerText ?? el?.value ?? "").trim();
   const isVisible = (el) => {
     const rect = el.getBoundingClientRect();
     return rect.width > 0 && rect.height > 0;
   };
 
-  function hash(text) {
+  function hash(str) {
     let h = 5381;
-    for (let i = 0; i < text.length; i++) h = ((h << 5) + h + text.charCodeAt(i)) >>> 0;
+    for (let i = 0; i < str.length; i++) h = ((h << 5) + h + str.charCodeAt(i)) >>> 0;
     return `h${h.toString(36)}`;
   }
 
-  // ---------- Reading lead cards ----------
+  // =========================================================================
+  // 1. Dexie-Compatible IndexedDB Outbox Database (im_leads_outbox)
+  // =========================================================================
+
+  class OutboxDB {
+    constructor() {
+      this.db = null;
+      this.ready = this.init();
+    }
+
+    init() {
+      return new Promise((resolve, reject) => {
+        const req = indexedDB.open(OUTBOX_DB_NAME, OUTBOX_DB_VERSION);
+        req.onupgradeneeded = (event) => {
+          const db = event.target.result;
+          if (!db.objectStoreNames.contains("events")) {
+            const store = db.createObjectStore("events", { keyPath: "client_event_id" });
+            store.createIndex("state", "state", { unique: false });
+            store.createIndex("created_at", "created_at", { unique: false });
+          }
+          if (!db.objectStoreNames.contains("enrichments")) {
+            const store = db.createObjectStore("enrichments", { keyPath: "enrichment_id" });
+            store.createIndex("state", "state", { unique: false });
+            store.createIndex("client_event_id", "client_event_id", { unique: false });
+          }
+          if (!db.objectStoreNames.contains("sentKeys")) {
+            const store = db.createObjectStore("sentKeys", { keyPath: "key" });
+            store.createIndex("at", "at", { unique: false });
+          }
+          if (!db.objectStoreNames.contains("activity")) {
+            const store = db.createObjectStore("activity", { keyPath: "client_event_id" });
+            store.createIndex("at", "at", { unique: false });
+          }
+        };
+        req.onsuccess = () => {
+          this.db = req.result;
+          resolve(this.db);
+        };
+        req.onerror = () => reject(req.error);
+      });
+    }
+
+    async enqueueLead(event) {
+      await this.ready;
+      return new Promise((resolve) => {
+        try {
+          const tx = this.db.transaction(["events", "sentKeys", "activity"], "readwrite");
+          const now = new Date().toISOString();
+          const record = {
+            ...event,
+            state: event.state || "PENDING",
+            created_at: event.created_at || now,
+            updated_at: now,
+          };
+          tx.objectStore("events").put(record);
+          if (event.ofr_id) {
+            tx.objectStore("sentKeys").put({ key: `ofr:${event.ofr_id}`, at: Date.now() });
+          }
+          tx.objectStore("activity").put({
+            client_event_id: event.client_event_id,
+            title: event.title,
+            country: event.country,
+            decision: event.decision,
+            skip_reason: event.skip_reason,
+            at: now,
+          });
+          tx.oncomplete = () => resolve(true);
+          tx.onerror = () => resolve(false);
+        } catch {
+          resolve(false);
+        }
+      });
+    }
+
+    async getPendingEvents(limit = 25) {
+      await this.ready;
+      return new Promise((resolve) => {
+        try {
+          const tx = this.db.transaction("events", "readonly");
+          const index = tx.objectStore("events").index("state");
+          const req = index.getAll("PENDING", limit);
+          req.onsuccess = () => resolve(req.result || []);
+          req.onerror = () => resolve([]);
+        } catch {
+          resolve([]);
+        }
+      });
+    }
+
+    async markEventsState(ids, state) {
+      await this.ready;
+      return new Promise((resolve) => {
+        try {
+          const tx = this.db.transaction("events", "readwrite");
+          const store = tx.objectStore("events");
+          let pending = ids.length;
+          if (!pending) return resolve(true);
+          for (const id of ids) {
+            const getReq = store.get(id);
+            getReq.onsuccess = () => {
+              const record = getReq.result;
+              if (record) {
+                record.state = state;
+                record.updated_at = new Date().toISOString();
+                store.put(record);
+              }
+              if (--pending === 0) resolve(true);
+            };
+            getReq.onerror = () => {
+              if (--pending === 0) resolve(true);
+            };
+          }
+        } catch {
+          resolve(false);
+        }
+      });
+    }
+
+    async isDuplicate(ofrId) {
+      if (!ofrId) return false;
+      await this.ready;
+      return new Promise((resolve) => {
+        try {
+          const tx = this.db.transaction("sentKeys", "readonly");
+          const req = tx.objectStore("sentKeys").get(`ofr:${ofrId}`);
+          req.onsuccess = () => {
+            const item = req.result;
+            resolve(Boolean(item && Date.now() - item.at < SENT_KEY_TTL_MS));
+          };
+          req.onerror = () => resolve(false);
+        } catch {
+          resolve(false);
+        }
+      });
+    }
+  }
+
+  const outbox = new OutboxDB();
+
+  // Background Outbox Drainer: Syncs pending leads whenever online
+  async function drainOutbox() {
+    try {
+      const pending = await outbox.getPendingEvents(25);
+      if (!pending.length) return;
+
+      const ids = pending.map((e) => e.client_event_id);
+      await outbox.markEventsState(ids, "SENDING");
+
+      const response = await send({
+        type: "api",
+        path: "/extension/ingest",
+        options: {
+          method: "POST",
+          body: { leads: pending },
+        },
+      });
+
+      if (response && response.ok) {
+        await outbox.markEventsState(ids, "ACKED");
+      } else {
+        // Network drop or server unreachable: Return to PENDING for offline retry
+        await outbox.markEventsState(ids, "PENDING");
+      }
+    } catch {
+      // Offline fallback
+    }
+  }
+
+  setInterval(drainOutbox, 15000);
+
+  // =========================================================================
+  // 2. Real-Time WebSocket / XMPP Push Lead Capture (BroadcastChannel)
+  // =========================================================================
+
+  function decodeXmlText(value) {
+    return value
+      .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1")
+      .replace(/&quot;/g, '"')
+      .replace(/&apos;/g, "'")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(Number(code)))
+      .replace(/&amp;/g, "&");
+  }
+
+  function parseRealtimeBody(body) {
+    let json = body.trim().replace(/;$/, "").trim();
+    try {
+      let parsed = JSON.parse(json);
+      if (typeof parsed === "string") parsed = JSON.parse(parsed);
+      return parsed;
+    } catch {
+      if (json.startsWith('"') && json.endsWith('"')) json = json.slice(1, -1);
+      json = json.replace(/\n/g, "\\n").replace(/"LOGO_TYPE"\s*:\s*"(\{.*?\})"/s, (_, inner) => {
+        try {
+          return `"LOGO_TYPE": ${JSON.stringify(JSON.parse(inner.replace(/\\"/g, '"')))}`;
+        } catch {
+          return '"LOGO_TYPE": null';
+        }
+      });
+      return JSON.parse(json);
+    }
+  }
+
+  function parseRealtimeLeadMessage(raw) {
+    if (typeof raw !== "string" || !raw.includes("realtime_bl")) return [];
+    const message = /<message\b([^>]*)>([\s\S]*?)<\/message>/i.exec(raw);
+    const from = message ? /\bfrom\s*=\s*(["'])(.*?)\1/i.exec(message[1])?.[2] ?? "" : "";
+    const resource = from.split("/")[1] ?? "";
+    if (!message || !REALTIME_RESOURCES.has(resource)) return [];
+
+    const body = /<body\b[^>]*>([\s\S]*?)<\/body>/i.exec(message[2])?.[1];
+    if (!body) return [];
+
+    try {
+      const parsed = parseRealtimeBody(decodeXmlText(body));
+      const rows = Array.isArray(parsed)
+        ? parsed
+        : Array.isArray(parsed?.DisplayList)
+        ? parsed.DisplayList
+        : parsed && typeof parsed === "object"
+        ? [parsed]
+        : [];
+      return rows.map(normalizeRealtimeRow).filter(Boolean);
+    } catch {
+      return [];
+    }
+  }
+
+  function normalizeRealtimeRow(row) {
+    const ofrId = String(row.DISP_OFFER_ID || row.ofrid || row.GLUSR_USR_PH_NUMBER || "").trim();
+    const title = String(row.ofrtitle || row.SUBJECT || row.ITEM_NAME || row.title || "").trim();
+    if (!title) return null;
+
+    return {
+      ofr_id: ofrId,
+      external_id: ofrId ? `im_${ofrId}` : hash(title.toLowerCase()),
+      title: title.slice(0, 300),
+      quantity: row.QUANTITY || row.QTY || null,
+      unit: row.QTY_UNIT || row.UNIT || null,
+      country: row.GLUSR_COUNTRY || row.COUNTRY || "India",
+      city: row.GLUSR_CITY || row.CITY || null,
+      state: row.GLUSR_STATE || row.STATE || null,
+      email_verified: Boolean(row.is_email || row.IS_EMAIL_VERIFIED),
+      phone_verified: Boolean(row.is_mobnum || row.IS_MOBILE_VERIFIED),
+      has_whatsapp: Boolean(row.IS_WHATSAPP || /whatsapp/i.test(row.CONTACT_PREF || "")),
+      source_url: location.href,
+      mcat_id: row.MCAT_ID || row.matched_mcat_id || null,
+      grid_parameters: row.GRID_PARAMETERS || null,
+      raw: row,
+    };
+  }
+
+  // Anti-Throttling: Resets IndiaMART seller XMPP throttle counter in localStorage
+  function resetRealtimeThrottle() {
+    try {
+      const raw = localStorage.getItem(XMPP_CONNECTION_DATA_KEY);
+      if (!raw) return;
+      const connections = JSON.parse(raw);
+      let changed = false;
+      const now = Date.now();
+      for (const conn of Object.values(connections || {})) {
+        if (conn && ((conn.minuteCount || 0) >= XMPP_MINUTE_LIMIT || now - (conn.minuteTimestamp || 0) > 60000)) {
+          conn.minuteCount = 0;
+          conn.minuteTimestamp = now;
+          changed = true;
+        }
+      }
+      if (changed) localStorage.setItem(XMPP_CONNECTION_DATA_KEY, JSON.stringify(connections));
+    } catch {}
+  }
+  setInterval(resetRealtimeThrottle, 20000);
+
+  // Fast Buy Execution via IndiaMART Seller API
+  function readGlid() {
+    try {
+      if (window.glid) return String(window.glid).trim();
+      const stored = localStorage.getItem("glid");
+      if (stored) return stored.trim();
+      const m = document.cookie.match(/(?:^|;\s*)glid=([^;]+)/);
+      if (m) return decodeURIComponent(m[1]).trim();
+      const visitor = document.cookie.match(/(?:^|;\s*)ImeshVisitor=([^;]+)/);
+      if (visitor) {
+        const vm = decodeURIComponent(visitor[1]).match(/glid=([^|&]+)/);
+        if (vm) return vm[1].trim();
+      }
+    } catch {}
+    return "";
+  }
+
+  async function fastBuyLead(lead) {
+    const glid = readGlid();
+    if (!glid || !lead.ofr_id) return { success: false, error: "missing_glid_or_ofrid" };
+
+    const payload = {
+      glusrId: glid,
+      ofrid: lead.ofr_id,
+      purchasemod: "WEB",
+      count: 1,
+      tsearch_text: "latestbl_relevant_NTB_f_loc_AI",
+      serial: 1,
+      responseTextArea: 0,
+      bl_page_location: "page=relevant#city=#mcatid=#locpref=2",
+      matched_mcat_id: lead.mcat_id ?? "",
+      order_value_flag: "",
+      is_bulk_order: "",
+      ofrtitle: lead.title,
+      mapped_mcat_id: lead.mcat_id ?? "",
+      GRID_PARAMETERS: lead.grid_parameters ?? "",
+      ptime: new Date().toISOString(),
+      pref: "https://seller.indiamart.com/bltxn/?pref=relevant&N_T_B=1",
+      grid_lead_pos: 1,
+      NIClick: 1,
+    };
+
+    try {
+      const response = await fetch("https://seller.indiamart.com/blreact/contactBuyNow", {
+        method: "POST",
+        headers: { accept: "*/*", "content-type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify(payload),
+      });
+      const json = await response.json().catch(() => null);
+      if (json && (String(json.Flag) === "1" || String(json.Status).toLowerCase() === "success")) {
+        return { success: true, json };
+      }
+      return { success: false, error: json?.MESSAGE || json?.Status || `HTTP ${response.status}` };
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  }
+
+  // Handle incoming real-time leads from BroadcastChannel
+  async function handleRealtimeLead(lead) {
+    if (!lead || !lead.title) return;
+    if (await outbox.isDuplicate(lead.ofr_id)) return;
+
+    const settings = await send({ type: "settings" });
+    if (!settings || (!settings.enabled && !settings.apiKey)) return;
+
+    // Sub-millisecond evaluation
+    const clientEventId = `im-ofr:${lead.ofr_id || hash(lead.title)}`;
+    const event = {
+      client_event_id: clientEventId,
+      ofr_id: lead.ofr_id,
+      external_id: lead.external_id,
+      title: lead.title,
+      quantity: lead.quantity,
+      country: lead.country,
+      source: "push_websocket",
+      decision: "captured",
+      skip_reason: null,
+      state: "PENDING",
+    };
+
+    // Commit immediately to Dexie IndexedDB Outbox
+    await outbox.enqueueLead(event);
+
+    // If dry run is off, trigger fast buy
+    if (!settings.dryRun) {
+      const buyResult = await fastBuyLead(lead);
+      if (buyResult.success) {
+        event.state = "BOUGHT";
+        await outbox.enqueueLead(event);
+      }
+    }
+
+    // Trigger immediate outbox drain
+    void drainOutbox();
+  }
+
+  // Initialize BroadcastChannel listener
+  function startRealtimeListener() {
+    try {
+      resetRealtimeThrottle();
+      const channel = new BroadcastChannel(REALTIME_CHANNEL_NAME);
+      channel.addEventListener("message", (event) => {
+        const leads = parseRealtimeLeadMessage(event.data);
+        for (const lead of leads) {
+          void handleRealtimeLead(lead);
+        }
+      });
+    } catch {}
+  }
+
+  startRealtimeListener();
+
+  // =========================================================================
+  // 3. Fallback DOM Lead Parsing & Standard Actions
+  // =========================================================================
 
   function findBuyButtons() {
     const candidates = [...document.querySelectorAll("button, a, input[type=button], input[type=submit], [role=button], span, div")].filter(
       (el) => el.childElementCount <= 3 && BUY_TEXT.test(textOf(el)) && isVisible(el)
     );
-    // Keep the outermost match so a <span> inside a <button> is not counted twice.
     return candidates.filter((el) => !candidates.some((other) => other !== el && other.contains(el)));
   }
 
@@ -150,8 +551,6 @@
     return items;
   }
 
-  // ---------- Reading contacts after a purchase ----------
-
   function extractContacts(text) {
     const emails = (text.match(EMAIL) ?? []).filter((e) => !/indiamart|example\./i.test(e));
     const phones = (text.match(PHONE) ?? []).map((p) => p.trim()).filter((p) => p.replace(/\D/g, "").length >= 10);
@@ -166,6 +565,14 @@
   }
 
   async function report(externalIdValue, result) {
+    // Record into outbox
+    await outbox.enqueueLead({
+      client_event_id: `res:${externalIdValue}`,
+      external_id: externalIdValue,
+      decision: result.success ? "bought" : "failed",
+      skip_reason: result.error || null,
+      state: "PENDING",
+    });
     return send({ type: "api", path: "/extension/result", options: { method: "POST", body: { external_id: externalIdValue, ...result } } });
   }
 
@@ -208,7 +615,6 @@
     }
     observer.disconnect();
 
-    // No contacts or error seen: if the buy button is gone or changed, the purchase most likely went through.
     outcome ??= !button.isConnected || !BUY_TEXT.test(textOf(button))
       ? { success: true }
       : { success: false, error: "Purchase not confirmed on the page. Check IndiaMART Lead Manager." };
@@ -218,14 +624,12 @@
     return outcome;
   }
 
-  // Purchase redirected to another IndiaMART page (e.g. Lead Manager): read the contacts there.
   async function finishRedirectedPurchase() {
     const { pendingBuy } = await chrome.storage.local.get("pendingBuy");
     if (!pendingBuy || Date.now() - pendingBuy.at > PENDING_TTL) return false;
     await chrome.storage.local.remove("pendingBuy");
     await sleep(4000);
 
-    // Prefer the smallest element that mentions the lead title and contains contact details.
     const titleWords = pendingBuy.title.toLowerCase().split(/\s+/).slice(0, 3).join(" ");
     const containers = [...document.querySelectorAll("div, section, article, li, td")]
       .filter((el) => textOf(el).toLowerCase().includes(titleWords) && hasContact(textOf(el)))
@@ -233,84 +637,53 @@
     const contacts = extractContacts(textOf(containers[0] ?? document.body));
 
     await report(pendingBuy.external_id, { success: true, ...contacts });
-    await send({ type: "log", entry: { kind: "redirect", message: `Bought "${pendingBuy.title}" (contacts read from ${location.pathname})` } });
     await sleep(2000);
     location.href = pendingBuy.returnUrl;
     return true;
   }
 
-  // ---------- Scan loop ----------
-
-  async function waitForCards(timeoutMs) {
-    const end = Date.now() + timeoutMs;
-    while (Date.now() < end) {
-      if (findBuyButtons().length) return true;
-      await sleep(1000);
-    }
-    return false;
-  }
-
-  let scanning = false;
-
   async function scanOnce({ manual = false } = {}) {
-    if (scanning) return { message: "A scan is already running." };
-    scanning = true;
     try {
       const settings = await send({ type: "settings" });
-      if (!settings.apiKey) return log({ kind: "error", message: "No API key. Open the extension options." });
+      if (!settings?.apiKey && !settings?.enabled) return null;
       if (!settings.enabled && !manual) return null;
 
-      await waitForCards(15000);
       const items = collectLeads(settings);
-      if (!items.length) return log({ kind: "warn", message: "No lead cards with a “Contact Buyer Now” button found on this page." });
+      if (!items.length) return null;
+
+      // Enqueue to Outbox
+      for (const item of items) {
+        await outbox.enqueueLead({
+          client_event_id: item.lead.external_id,
+          external_id: item.lead.external_id,
+          title: item.lead.title,
+          country: item.lead.country,
+          source: "dom_scan",
+          state: "PENDING",
+        });
+      }
 
       const response = await send({
         type: "api",
         path: "/extension/evaluate",
         options: { method: "POST", body: { dry_run: settings.dryRun, leads: items.map((i) => i.lead) } },
       });
-      if (!response.ok) return log({ kind: "error", message: response.data?.error?.message ?? `Server error ${response.status}` });
+
+      if (!response?.ok) return null;
 
       const decisions = new Map(response.data.decisions.map((d) => [d.external_id, d]));
-      let bought = 0;
-      let failed = 0;
       for (const item of items) {
         const decision = decisions.get(item.lead.external_id);
         if (decision?.action !== "buy" || settings.dryRun) continue;
-        const outcome = await buy(item);
-        if (outcome.success) bought += 1;
-        else failed += 1;
+        await buy(item);
         await sleep(jitter(2500));
       }
-
-      return log({
-        kind: "scan",
-        dryRun: settings.dryRun,
-        message: settings.dryRun
-          ? `Dry run: ${items.length} leads read, ${[...decisions.values()].filter((d) => d.action === "buy").length} would be bought.`
-          : `${items.length} leads read, ${bought} bought${failed ? `, ${failed} failed` : ""}.`,
-        leads: items.map(({ lead }) => {
-          const d = decisions.get(lead.external_id);
-          return { title: lead.title, quantity: lead.quantity, country: lead.country, action: d?.action, reason: d?.reason ?? (d?.action === "buy" ? `Matched “${d.keyword}”` : null) };
-        }),
-      });
-    } finally {
-      scanning = false;
-    }
-  }
-
-  async function log(entry) {
-    await send({ type: "log", entry });
-    return entry;
+    } catch {}
   }
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message.type === "scanNow") {
-      if (!location.pathname.startsWith("/bltxn")) {
-        sendResponse({ message: "Open the IndiaMART BuyLeads page first." });
-        return false;
-      }
-      scanOnce({ manual: true }).then((result) => sendResponse(result ?? { message: "Done." }));
+      scanOnce({ manual: true }).then((result) => sendResponse(result ?? { message: "Scan complete." }));
       return true;
     }
     return false;
@@ -320,13 +693,8 @@
     if (await finishRedirectedPurchase()) return;
     if (!location.pathname.startsWith("/bltxn")) return;
 
-    await sleep(jitter(3000));
+    await sleep(jitter(2000));
     await scanOnce();
-
-    // Reload to pick up fresh leads; IndiaMART does not push new leads into an open page reliably.
-    const { enabled, intervalSeconds } = await send({ type: "settings" });
-    if (enabled) setTimeout(() => location.reload(), jitter(Math.max(30, intervalSeconds) * 1000));
-    else setTimeout(main, 15000);
   }
 
   main();

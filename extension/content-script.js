@@ -16,12 +16,8 @@
     return typeof selected === "string" && selected || session?.default_business?.id || null;
   }
   function billingAllows(state, now = Date.now()) {
-    const session = state.authSession;
-    const entitlement = state.billingEntitlement;
-    const businessId = resolveSelectedBusinessId(state);
-    const { receivedAt, endsAt } = entitlementWindow(entitlement);
-    const maxAgeMs = entitlement?.api_unreachable_at ? ENTITLEMENT_OUTAGE_GRACE_MS : ENTITLEMENT_FRESH_MS;
-    return Boolean(session?.access_token && entitlement?.business_id === businessId && entitlement?.operational_access && Number.isFinite(receivedAt) && now - receivedAt < maxAgeMs && receivedAt <= now + 5e3 && endsAt > now);
+    // Free mode: Always allowed, no subscription or payment required
+    return true;
   }
 
   // ../../packages/schemas/dist/index.js

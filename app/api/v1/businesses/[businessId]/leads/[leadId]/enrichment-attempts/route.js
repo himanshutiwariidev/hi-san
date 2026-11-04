@@ -28,3 +28,4 @@ export const POST = route(async (request, { businessId, leadId }) => {
 
   return Response.json({ ok: true });
 });
+

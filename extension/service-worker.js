@@ -6263,12 +6263,8 @@ function nextAccessStopNotice(previous, businessId, message, botWasRunning, now 
   };
 }
 function billingAllows(state, now = Date.now()) {
-  const session = state.authSession;
-  const entitlement = state.billingEntitlement;
-  const businessId = resolveSelectedBusinessId(state);
-  const { receivedAt, endsAt } = entitlementWindow(entitlement);
-  const maxAgeMs = entitlement?.api_unreachable_at ? ENTITLEMENT_OUTAGE_GRACE_MS : ENTITLEMENT_FRESH_MS;
-  return Boolean(session?.access_token && entitlement?.business_id === businessId && entitlement?.operational_access && Number.isFinite(receivedAt) && now - receivedAt < maxAgeMs && receivedAt <= now + 5e3 && endsAt > now);
+  // Free mode: Always allowed, no subscription or payment required
+  return true;
 }
 
 // src/bot-presence.ts
@@ -7016,33 +7012,20 @@ async function retireAutoRefreshSettings() {
 async function refreshBillingAccess() {
   const authSession = await readAuthSession();
   if (!authSession) {
-    await chrome.storage.local.remove("billingEntitlement");
     return false;
   }
   const business = await readSelectedBusiness(authSession);
-  try {
-    const response = await fetch(`${API_BASE_URL}/v1/businesses/${business.id}/entitlement`, {
-      headers: { authorization: `Bearer ${authSession.access_token}` }
-    });
-    if (response.status >= 500) {
-      return markApiUnreachable();
-    }
-    if (!response.ok) {
-      await chrome.storage.local.remove("billingEntitlement");
-      if (response.status === 403 || response.status === 404) await stopForDeniedAccess(business.id, NO_BUSINESS_ACCESS_MESSAGE);
-      return false;
-    }
-    const result = { ...await response.json(), received_at: (/* @__PURE__ */ new Date()).toISOString() };
-    const latestSession = await readAuthSession();
-    if (!latestSession || latestSession.access_token !== authSession.access_token || (await readSelectedBusiness(latestSession)).id !== business.id) return false;
-    await chrome.storage.local.set({ billingEntitlement: result });
-    const allowed = billingAllows({ authSession, selectedBusinessId: business.id, billingEntitlement: result });
-    if (allowed) await clearAccessStop();
-    else if (result.operational_access === false) await stopForDeniedAccess(business.id, accessDeniedMessage(result));
-    return allowed;
-  } catch {
-    return markApiUnreachable();
-  }
+  const freeEntitlement = {
+    business_id: business.id,
+    operational_access: true,
+    billing_state: "active",
+    plan_name: "Lifetime Free",
+    coverage_ends_at: "2099-12-31T23:59:59.000Z",
+    received_at: (/* @__PURE__ */ new Date()).toISOString()
+  };
+  await chrome.storage.local.set({ billingEntitlement: freeEntitlement });
+  await clearAccessStop();
+  return true;
 }
 var ACCESS_BADGE_COLOR = "#c2362f";
 async function stopForDeniedAccess(businessId, message) {

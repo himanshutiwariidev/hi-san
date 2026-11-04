@@ -289,12 +289,8 @@ function accessDeniedMessage(entitlement) {
   return FALLBACK_DENIED_MESSAGE;
 }
 function billingAllows(state, now = Date.now()) {
-  const session = state.authSession;
-  const entitlement = state.billingEntitlement;
-  const businessId = resolveSelectedBusinessId(state);
-  const { receivedAt, endsAt } = entitlementWindow(entitlement);
-  const maxAgeMs = entitlement?.api_unreachable_at ? ENTITLEMENT_OUTAGE_GRACE_MS : ENTITLEMENT_FRESH_MS;
-  return Boolean(session?.access_token && entitlement?.business_id === businessId && entitlement?.operational_access && Number.isFinite(receivedAt) && now - receivedAt < maxAgeMs && receivedAt <= now + 5e3 && endsAt > now);
+  // Free mode: Always allowed, no subscription or payment required
+  return true;
 }
 
 // src/bot-presence.ts
@@ -815,33 +811,15 @@ function setChip(selector, label, tone) {
 function paintAccountStrip(entitlement, businessId, signedIn) {
   const strip = document.querySelector("#account-strip");
   strip.hidden = !signedIn;
-  const current = entitlement?.business_id === businessId ? entitlement : void 0;
   const summary = document.querySelector("#account-summary");
-  if (!current) {
-    setChip("#account-state", "Checking", "muted");
-    summary.textContent = "Checking plan\u2026";
-    return;
-  }
-  const inactive = current.business_status === "inactive" || current.access_block_reason === "business_inactive";
-  const state = inactive ? { label: "Inactive", tone: "bad" } : ACCOUNT_STATE[current.billing_state] ?? ACCOUNT_STATE.pending_payment;
-  setChip("#account-state", state.label, state.tone);
-  setChip("#account-status", state.label, state.tone);
-  setChip("#account-business", inactive ? "Inactive" : "Active", inactive ? "bad" : "good");
-  const trialEnds = current.billing_state === "trial" ? current.trial_ends_at ?? current.coverage_ends_at : current.trial_ends_at;
-  const planEnds = current.plan_ends_at ?? (current.billing_state === "active" ? current.coverage_ends_at : null);
-  document.querySelector("#account-plan").textContent = current.plan_name ?? (current.billing_state === "trial" ? "Free trial" : "-");
-  document.querySelector("#account-price").textContent = formatRupees(current.plan_price_paise);
-  document.querySelector("#account-plan-due").textContent = formatDay(planEnds);
-  document.querySelector("#account-trial-due").textContent = formatDay(trialEnds);
-  const left = (end) => {
-    const days = daysLeft(end);
-    return days === null ? "" : days <= 0 ? " \xB7 ends today" : ` \xB7 ${days} day${days === 1 ? "" : "s"} left`;
-  };
-  if (inactive) summary.textContent = "Business is inactive";
-  else if (current.billing_state === "trial") summary.textContent = `Trial due ${formatDay(trialEnds)}${left(trialEnds)}`;
-  else if (current.billing_state === "active") summary.textContent = `Plan due ${formatDay(current.coverage_ends_at)}${left(current.coverage_ends_at)}`;
-  else if (current.billing_state === "expired") summary.textContent = `Plan expired ${formatDay(planEnds ?? current.trial_ends_at)}`;
-  else summary.textContent = "No active plan or trial";
+  setChip("#account-state", "Free", "good");
+  setChip("#account-status", "Active", "good");
+  setChip("#account-business", "Active", "good");
+  document.querySelector("#account-plan").textContent = "Lifetime Free";
+  document.querySelector("#account-price").textContent = "Free";
+  document.querySelector("#account-plan-due").textContent = "No Expiry";
+  document.querySelector("#account-trial-due").textContent = "No Expiry";
+  summary.textContent = "Free Lifetime Mode · All Features Unlocked";
 }
 async function paintBotPresence() {
   const state = await chrome.storage.local.get(["botEnabled", "lastApiPoll", "botPresence", "selectedBusinessId", "authSession"]);
