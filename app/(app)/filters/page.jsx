@@ -13,18 +13,15 @@ import CountrySelect from "@/components/CountrySelect";
 import { useApp } from "@/components/AppContext";
 import { apiClient, errorMessage } from "@/lib/api";
 import { countries, countryName, findCountry } from "@/lib/countries";
-import { COMMON_UNITS, INDIAN_STATES } from "@/lib/geo";
 import { useResource } from "@/lib/useResource";
 
 const emptyDraft = {
   keyword: "",
   type: "positive",
   match: "contains",
-  unit: "",
   minimumQuantity: "",
   maxLeadsPerDay: "",
   country: "",
-  state: "",
 };
 
 function parseKeywordCsv(text) {
@@ -104,57 +101,97 @@ function SettingsForm({ business }) {
         </LabeledField>
       </div>
 
-      <div className="grid grid-cols-2 gap-4 max-[760px]:grid-cols-1">
-        <div className="grid gap-1.5">
-          <div className="flex items-center justify-between gap-3">
-            <span className="text-[13px] text-muted">Allowed Indian States (empty = all India)</span>
-            <button type="button" className="border-0 bg-transparent p-0 text-[12px] font-bold text-accent-dark cursor-pointer" onClick={() => update({ allowed_states: [] })}>
-              Clear
-            </button>
-          </div>
-          <select
-            className={inputClass}
-            onChange={(e) => {
-              const val = e.target.value;
-              if (val && !settings.allowed_states?.includes(val)) {
-                update({ allowed_states: [...(settings.allowed_states ?? []), val] });
-              }
-              e.target.value = "";
-            }}
-          >
-            <option value="">+ Add State</option>
-            {INDIAN_STATES.map((s) => (
-              <option key={s.code} value={s.name}>
-                {s.name}
-              </option>
-            ))}
-          </select>
-          <div className="flex flex-wrap gap-1.5 pt-1">
-            {(settings.allowed_states ?? []).map((st) => (
-              <span key={st} className="inline-flex items-center gap-1 rounded-full border border-border bg-surface-muted px-2.5 py-1 text-xs">
-                {st}
-                <button
-                  type="button"
-                  onClick={() => update({ allowed_states: settings.allowed_states.filter((s) => s !== st) })}
-                  className="border-0 bg-transparent text-muted hover:text-danger cursor-pointer"
-                >
-                  ×
-                </button>
-              </span>
-            ))}
-          </div>
+      <div className="grid gap-1.5">
+        <div className="flex items-center justify-between gap-3">
+          <span className="text-[13px] text-muted">Allowed Countries (empty = all countries)</span>
+          <button type="button" className="border-0 bg-transparent p-0 text-[12px] font-bold text-accent-dark cursor-pointer" onClick={() => update({ allowed_countries: [] })}>
+            Clear
+          </button>
+        </div>
+        <CountrySelect value={settings.allowed_countries ?? []} onChange={(allowed_countries) => update({ allowed_countries })} />
+      </div>
+
+      {/* Contact Verification & Mode Filters */}
+      <fieldset className="grid gap-3.5 rounded-xl border border-border p-4">
+        <legend className="text-[13px] font-bold text-muted">Contact Filters</legend>
+        <p className="m-0 text-[12px] text-muted">
+          Every lead is checked against these rules. Control whether phone, email, or either one is required.
+        </p>
+
+        <div className="grid grid-cols-3 gap-4 max-[760px]:grid-cols-1">
+          <LabeledField label="Email Mode">
+            <select
+              value={settings.email_mode ?? "off"}
+              onChange={(e) => update({ email_mode: e.target.value })}
+              className={inputClass}
+              disabled={settings.any_contact_mode === "one_verified" || settings.any_contact_mode === "one_available_one_verified"}
+            >
+              <option value="off">Off (Not checked)</option>
+              <option value="available">Available (Email shown)</option>
+              <option value="verified">Verified (IndiaMART verified email)</option>
+            </select>
+            <span className="text-[11px] text-muted">
+              {settings.email_mode === "verified"
+                ? "Must have green tick verified email."
+                : settings.email_mode === "available"
+                ? "Must show an email address."
+                : "Email presence is not checked."}
+            </span>
+          </LabeledField>
+
+          <LabeledField label="Phone / WhatsApp Mode">
+            <select
+              value={settings.phone_mode ?? "off"}
+              onChange={(e) => update({ phone_mode: e.target.value })}
+              className={inputClass}
+              disabled={settings.any_contact_mode === "one_verified" || settings.any_contact_mode === "one_available_one_verified"}
+            >
+              <option value="off">Off (Not checked)</option>
+              <option value="available">Available (Phone or WhatsApp shown)</option>
+              <option value="verified">Verified (IndiaMART verified mobile)</option>
+            </select>
+            <span className="text-[11px] text-muted">
+              {settings.phone_mode === "verified"
+                ? "Must have green tick OTP-verified mobile."
+                : settings.phone_mode === "available"
+                ? "Must show phone or active WhatsApp."
+                : "Phone presence is not checked."}
+            </span>
+          </LabeledField>
+
+          <LabeledField label="Any Contact Mode (Combination)">
+            <select
+              value={settings.any_contact_mode ?? "off"}
+              onChange={(e) => update({ any_contact_mode: e.target.value })}
+              className={inputClass}
+            >
+              <option value="off">Off (Email & Phone checked separately)</option>
+              <option value="required">Either one (Email OR Phone must pass)</option>
+              <option value="one_verified">Any Verified (Email OR Phone verified)</option>
+              <option value="one_available_one_verified">One Available + One Verified</option>
+            </select>
+            <span className="text-[11px] text-muted">
+              {settings.any_contact_mode === "required"
+                ? "Passes if lead has Email OR Phone."
+                : settings.any_contact_mode === "one_verified"
+                ? "Passes if at least 1 contact is OTP-verified."
+                : settings.any_contact_mode === "one_available_one_verified"
+                ? "Must have 1 available + 1 verified contact."
+                : "Both Email & Phone rules must pass."}
+            </span>
+          </LabeledField>
         </div>
 
-        <div className="grid gap-1.5">
-          <div className="flex items-center justify-between gap-3">
-            <span className="text-[13px] text-muted">Allowed Countries (empty = all countries)</span>
-            <button type="button" className="border-0 bg-transparent p-0 text-[12px] font-bold text-accent-dark cursor-pointer" onClick={() => update({ allowed_countries: [] })}>
-              Clear
-            </button>
-          </div>
-          <CountrySelect value={settings.allowed_countries ?? []} onChange={(allowed_countries) => update({ allowed_countries })} />
-        </div>
-      </div>
+        <label className="flex items-center gap-2 text-[13px] pt-1">
+          <input
+            type="checkbox"
+            checked={Boolean(settings.trusted_buyer_bypass)}
+            onChange={(e) => update({ trusted_buyer_bypass: e.target.checked })}
+            className="accent-accent"
+          />
+          <span>Trusted buyers (1+ year on IndiaMART, any contact) skip contact filter</span>
+        </label>
+      </fieldset>
 
       <fieldset className="grid gap-2.5 rounded-xl border border-border p-3.5">
         <legend className="text-[13px] font-bold text-muted">Quality &amp; Anti-Junk Filters</legend>
@@ -166,14 +203,6 @@ function SettingsForm({ business }) {
           <label className="flex items-center gap-2 text-[13px]">
             <input type="checkbox" checked={Boolean(!settings.include_retail_leads)} onChange={(e) => update({ include_retail_leads: !e.target.checked })} className="accent-accent" />
             Block Retail Enquiries (1-piece / retail-flagged)
-          </label>
-          <label className="flex items-center gap-2 text-[13px]">
-            <input type="checkbox" checked={Boolean(settings.require_phone_verified)} onChange={(e) => update({ require_phone_verified: e.target.checked })} className="accent-accent" />
-            Require Mobile Verified
-          </label>
-          <label className="flex items-center gap-2 text-[13px]">
-            <input type="checkbox" checked={Boolean(settings.require_email_verified)} onChange={(e) => update({ require_email_verified: e.target.checked })} className="accent-accent" />
-            Require Email Verified
           </label>
         </div>
         <div className="grid grid-cols-2 gap-4 pt-2 max-[760px]:grid-cols-1">
@@ -238,11 +267,9 @@ function KeywordRules({ business }) {
         keyword: draft.keyword,
         type: tab,
         match: draft.match,
-        unit: draft.unit || null,
         minimumQuantity: draft.minimumQuantity ? Number(draft.minimumQuantity) : null,
         maxLeadsPerDay: draft.maxLeadsPerDay ? Number(draft.maxLeadsPerDay) : null,
         countries: draft.country ? [draft.country] : [],
-        states: draft.state ? [draft.state] : [],
       });
       setDraft(emptyDraft);
     }, `${tab === "positive" ? "Target" : "Excluded"} keyword added.`);
@@ -321,40 +348,16 @@ function KeywordRules({ business }) {
         </LabeledField>
 
         {tab === "positive" ? (
-          <>
-            <LabeledField label="Unit (optional)">
-              <select value={draft.unit} onChange={(e) => setDraft({ ...draft, unit: e.target.value })} className={inputClass}>
-                <option value="">Any unit</option>
-                {COMMON_UNITS.map((u) => (
-                  <option key={u.value} value={u.value}>
-                    {u.label}
-                  </option>
-                ))}
-              </select>
-            </LabeledField>
-
-            <LabeledField label="Min Quantity">
-              <input
-                type="number"
-                min={0}
-                placeholder="Any"
-                value={draft.minimumQuantity}
-                onChange={(e) => setDraft({ ...draft, minimumQuantity: e.target.value })}
-                className={inputClass}
-              />
-            </LabeledField>
-
-            <LabeledField label="Target State">
-              <select value={draft.state} onChange={(e) => setDraft({ ...draft, state: e.target.value })} className={inputClass}>
-                <option value="">All States</option>
-                {INDIAN_STATES.map((s) => (
-                  <option key={s.code} value={s.name}>
-                    {s.name}
-                  </option>
-                ))}
-              </select>
-            </LabeledField>
-          </>
+          <LabeledField label="Min Quantity">
+            <input
+              type="number"
+              min={0}
+              placeholder="Any"
+              value={draft.minimumQuantity}
+              onChange={(e) => setDraft({ ...draft, minimumQuantity: e.target.value })}
+              className={inputClass}
+            />
+          </LabeledField>
         ) : null}
 
         <PrimaryButton type="submit">{tab === "positive" ? "Add Target Rule" : "Add Exclude Rule"}</PrimaryButton>
@@ -368,13 +371,7 @@ function KeywordRules({ business }) {
             <tr>
               <Th>Keyword</Th>
               <Th>Match</Th>
-              {tab === "positive" ? (
-                <>
-                  <Th>Unit</Th>
-                  <Th>Min Qty</Th>
-                  <Th>Target State</Th>
-                </>
-              ) : null}
+              {tab === "positive" ? <Th>Min Qty</Th> : null}
               <Th>Status</Th>
               <Th />
             </tr>
@@ -385,11 +382,7 @@ function KeywordRules({ business }) {
                 <Td className="font-semibold text-text">{rule.keyword}</Td>
                 <Td className="capitalize">{rule.match}</Td>
                 {tab === "positive" ? (
-                  <>
-                    <Td className="text-muted">{rule.unit || "Any"}</Td>
-                    <Td className="text-muted">{rule.minimum_quantity ?? "Any"}</Td>
-                    <Td className="text-muted">{rule.states?.length ? rule.states.join(", ") : "All States"}</Td>
-                  </>
+                  <Td className="text-muted">{rule.minimum_quantity ?? "Any"}</Td>
                 ) : null}
                 <Td>
                   <StatusPill tone={rule.enabled ? "success" : "muted"}>{rule.enabled ? "Active" : "Paused"}</StatusPill>
@@ -425,7 +418,10 @@ export default function FiltersPage() {
   const { business } = useApp();
   return (
     <div className="grid gap-[22px]">
-      <PageHeader title="Filters & Keywords" description={`Granular targeting rules for ${business.name}.`} />
+      <PageHeader
+        title="Keywords"
+        description={`Positive and negative keyword rules with quantity thresholds and daily lead limits. No business or keyword captures more than ${business.daily_limit ?? 11} leads a day.`}
+      />
       <Card className="grid gap-4">
         <div>
           <h2 className="m-0 mb-2 text-lg font-bold">Bot Filter Settings</h2>

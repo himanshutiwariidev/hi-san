@@ -19,7 +19,7 @@ const navigation = [
       { href: "/leads?status=not_retrieved", label: "Not retrieved" },
     ],
   },
-  { href: "/filters", label: "Filters & keywords", icon: "filter" },
+  { href: "/keywords", label: "Keywords", icon: "filter" },
   { href: "/extension", label: "Extension", icon: "puzzle" },
   { href: "/webhooks", label: "Webhooks", icon: "webhook" },
   { href: "/usage", label: "Usage", icon: "billing" },
