@@ -2,6 +2,10 @@ import { db, newId, now, transaction } from "@/lib/server/db";
 import { requireBusiness, requireUser } from "@/lib/server/auth";
 import { badRequest, readJson, route } from "@/lib/server/http";
 import { dispatchLeadEvent } from "@/lib/server/webhooks";
+import { describeLeadReason } from "@/lib/leadReasons";
+
+const keywordOfRule = (businessId, ruleId) =>
+  ruleId ? (db.prepare("SELECT keyword FROM keyword_rules WHERE id = ? AND business_id = ?").get(String(ruleId), businessId)?.keyword ?? null) : null;
 
 export const POST = route(async (request, { businessId }) => {
   const user = await requireUser();
@@ -21,29 +25,45 @@ export const POST = route(async (request, { businessId }) => {
       const title = String(item.title ?? "").trim().slice(0, 300);
       if (!title) continue;
 
-      const decision = item.decision === "captured" ? "captured" : "skipped";
-      const status = decision === "captured" ? "retrieved" : "filtered";
-      const filterReason = item.skip_reason ?? item.reason ?? (decision === "captured" ? null : "Filtered by rules");
+      // The extension decides and sends its verdict under local_decision. A captured lead only means
+      // "buying": it becomes retrieved when the enrichment confirms the purchase.
+      const local = item.local_decision && typeof item.local_decision === "object" ? item.local_decision : {};
+      const decision = (item.decision ?? local.decision) === "captured" ? "captured" : "skipped";
+      const status = decision === "captured" ? "pending" : "filtered";
+      const filterReason = item.skip_reason ?? item.reason ?? local.skip_reason ?? (decision === "captured" ? null : "Filtered by rules");
+      const reasonDetail = local.explanation ? JSON.stringify(local.explanation).slice(0, 2000) : null;
+      const ruleIds = item.matched_positive_rule_ids ?? local.matched_positive_rule_ids ?? [];
+      const matchedKeyword = item.matched_keyword ?? keywordOfRule(business.id, ruleIds[0]);
 
       const existing = db
         .prepare("SELECT * FROM leads WHERE business_id = ? AND (external_id = ? OR client_event_id = ?)")
         .get(business.id, externalId, clientEventId);
 
       if (existing) {
-        db.prepare(
-          `UPDATE leads SET
-            title = COALESCE(?, title),
-            decision = ?,
-            status = CASE WHEN status = 'retrieved' THEN 'retrieved' ELSE ? END,
-            filter_reason = COALESCE(?, filter_reason)
-           WHERE id = ?`
-        ).run(title, decision, status, filterReason, existing.id);
+        // The extension resends an event when it missed our answer. That must not undo a purchase
+        // in progress or its result, so only a lead that was filtered can be decided again.
+        const redecide = existing.status === "filtered";
+        if (redecide) {
+          db.prepare(
+            `UPDATE leads SET
+              title = COALESCE(?, title),
+              decision = ?,
+              status = ?,
+              filter_reason = ?,
+              reason_detail = ?,
+              matched_keyword = COALESCE(?, matched_keyword),
+              matched_rule_ids = COALESCE(?, matched_rule_ids),
+              decided_at = ?
+             WHERE id = ?`
+          ).run(title, decision, status, filterReason, reasonDetail, matchedKeyword, ruleIds.length ? JSON.stringify(ruleIds) : null, now(), existing.id);
+        }
 
         results.push({
           client_event_id: clientEventId || `im-ofr:${externalId}`,
           lead_id: existing.id,
-          decision,
-          reason: filterReason,
+          decision: redecide ? decision : "captured",
+          skip_reason: redecide ? filterReason : null,
+          reason: redecide ? filterReason : existing.filter_reason,
         });
         continue;
       }
@@ -56,9 +76,9 @@ export const POST = route(async (request, { businessId }) => {
         `INSERT INTO leads (
           id, business_id, external_id, client_event_id, title, category, quantity, unit,
           country_code, country_name, city, state, address,
-          email_verified, phone_verified, gst_verified, has_whatsapp, buyer_member_months, is_retail,
-          status, decision, filter_reason, matched_keyword, source_url, raw, received_at, decided_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          email_verified, phone_verified, gst_verified, has_whatsapp, has_email, has_phone, buyer_member_months, is_retail,
+          status, decision, filter_reason, reason_detail, matched_keyword, matched_rule_ids, source_url, raw, received_at, decided_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       ).run(
         id,
         business.id,
@@ -77,12 +97,16 @@ export const POST = route(async (request, { businessId }) => {
         item.phone_verified ? 1 : 0,
         item.gst_verified ? 1 : 0,
         item.has_whatsapp ? 1 : 0,
+        item.has_email ? 1 : 0,
+        item.has_phone ? 1 : 0,
         item.buyer_member_months ?? null,
         item.is_retail_flagged ? 1 : 0,
         status,
         decision,
         filterReason,
-        item.matched_keyword ?? (item.matched_positive_rule_ids?.[0] ?? null),
+        reasonDetail,
+        matchedKeyword,
+        ruleIds.length ? JSON.stringify(ruleIds) : null,
         item.source_url ? String(item.source_url).slice(0, 500) : null,
         raw,
         ts,
@@ -92,13 +116,16 @@ export const POST = route(async (request, { businessId }) => {
       db.prepare("INSERT INTO lead_logs (lead_id, at, message) VALUES (?, ?, ?)").run(
         id,
         ts,
-        decision === "captured" ? "Auto-bought via fast network hook" : `Filtered: ${filterReason}`
+        decision === "captured"
+          ? `Matched${matchedKeyword ? ` keyword "${matchedKeyword}"` : ""}: buying`
+          : `Filtered: ${describeLeadReason({ status, filter_reason: filterReason, reason_detail: reasonDetail }).label}`
       );
 
       results.push({
         client_event_id: clientEventId || `im-ofr:${externalId}`,
         lead_id: id,
         decision,
+        skip_reason: filterReason,
         reason: filterReason,
       });
 

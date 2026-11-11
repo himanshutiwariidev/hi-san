@@ -85,6 +85,9 @@ function countBy(list, keyFn) {
   return [...map.entries()].sort((a, b) => b[1] - a[1]);
 }
 
+// The daily purchase limit is enforced per UTC day, so "Bought today" has to count the same window.
+const startOfUtcDay = () => `${new Date().toISOString().slice(0, 10)}T00:00:00.000Z`;
+
 export default function DashboardPage() {
   const { business } = useApp();
   const [from, setFrom] = useState(() => localDateString(daysAgo(29)));
@@ -99,7 +102,7 @@ export default function DashboardPage() {
     [business.id, from, to],
     { refreshMs: 30000 }
   );
-  const todayRes = useResource(() => apiClient.listLeads(business.id, { since: startOfDayIso(localDateString()) }), [business.id], { refreshMs: 30000 });
+  const todayRes = useResource(() => apiClient.listLeads(business.id, { since: startOfUtcDay() }), [business.id], { refreshMs: 30000 });
   const settingsRes = useResource(() => apiClient.getFilterSettings(business.id), [business.id]);
   const extensionRes = useResource(() => apiClient.getExtension(business.id), [business.id], { refreshMs: 30000 });
 
@@ -151,7 +154,7 @@ export default function DashboardPage() {
   const extension = extensionRes.data;
   const online = isOnline(extension?.last_heartbeat);
 
-  const filterReasons = countBy(inRange.filter((l) => l.status === "filtered" && l.filter_reason), (l) => l.filter_reason.split(":")[0]);
+  const filterReasons = countBy(inRange.filter((l) => l.status === "filtered" && l.reason && l.reason.group !== "legacy"), (l) => l.reason.label);
   const insights = [
     !online && { tone: "danger", icon: "puzzle", text: <>The extension is <strong>offline</strong>. Open IndiaMART BuyLeads with the extension running.</>, href: "/extension" },
     topKeywords[0] && { tone: "accent", icon: "trend", text: <>Most leads matched <strong>{topKeywords[0][0]}</strong> ({topKeywords[0][1]}) in this period.</>, href: "/leads" },

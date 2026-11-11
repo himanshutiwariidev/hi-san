@@ -286,6 +286,7 @@
       rules.push({
         id: String(rule.id),
         type: rule.type,
+        keyword: rule.keyword,
         matches: matches ?? (() => false),
         minimumQuantity: rule.minimum_quantity ?? null,
         unit: rule.unit ?? null,
@@ -424,6 +425,44 @@
     }
     const reason = ["keyword_country_mismatch", "keyword_state_mismatch", "unit_mismatch", "quantity_below_minimum"].find((candidate) => mismatches.has(candidate));
     return skipped(reason ?? "no_positive_keyword_match");
+  }
+  function explainSkip(lead, config) {
+    try {
+      const { settings } = config;
+      const normalizedTitle = normalizeText(lead.title);
+      const allowedCountries = settings.allowed_countries.map(normalizeText).filter(Boolean);
+      const allowedStates = (settings.allowed_states ?? []).filter((state) => normalizeText(state));
+      const rules = compiledRules(config);
+      const negativeText = settings.negative_keyword_full_text === true ? negativeSearchText(lead) : normalizedTitle;
+      const excluded = rules.find((rule) => rule.type === "negative" && rule.matches(negativeText));
+      const missingContacts = missingContactSignals(lead, settings);
+      const contactBypassed = settings.trusted_buyer_bypass === true && isTrustedBuyer(lead);
+      const reasons = [];
+      if (allowedCountries.length && !countryAllowed(lead.country, allowedCountries, lead.country_iso)) {
+        reasons.push("country_not_allowed");
+      }
+      if (allowedStates.length && isIndianLead(lead) && !stateAllowed(lead, allowedStates)) {
+        reasons.push("state_not_allowed");
+      }
+      if (missingContacts.length && !contactBypassed) {
+        reasons.push("contact_requirement_not_met");
+      }
+      if (settings.require_gst_verified === true && lead.gst_verified !== true) {
+        reasons.push("gst_not_verified");
+      }
+      if (!categoryAllowed(lead, settings)) {
+        reasons.push("category_not_allowed");
+      }
+      if (excluded) {
+        reasons.push("negative_keyword_match");
+      }
+      if (!rules.some((rule) => rule.type === "positive" && rule.matches(normalizedTitle))) {
+        reasons.push("no_positive_keyword_match");
+      }
+      return { reasons, missing_contacts: missingContacts, excluded_keyword: excluded?.keyword ?? null };
+    } catch {
+      return null;
+    }
   }
   function rankExpiredLead(lead, config) {
     const { settings } = config;
@@ -637,8 +676,11 @@
   function looksLikeActivityWarning(text3) {
     return ACTIVITY_WARNING_PATTERN.test(text3);
   }
+  function isRateLimitStatus(status) {
+    return status === 429 || status === 403 || status === 503;
+  }
   function parseBuyResult(result) {
-    if (result.status === 429) {
+    if (isRateLimitStatus(result.status)) {
       return { kind: "rate_limited", retryAfterSeconds: result.retryAfterSeconds ?? DEFAULT_BUY_RATE_LIMIT_COOLDOWN_SECONDS };
     }
     const json = result.json;
@@ -676,7 +718,8 @@
         city: text(buyer.GLUSR_CITY),
         state: text(buyer.GLUSR_STATE),
         country: text(buyer.GLUSR_COUNTRY),
-        member_since: text(buyer.GLUSR_USR_MEMBERSINCE)
+        member_since: text(buyer.GLUSR_USR_MEMBERSINCE),
+        contact_fields: Object.keys(buyer).filter((key) => /PH|MOBILE|EMAIL/i.test(key) && text(buyer[key]))
       }
     };
   }
@@ -703,12 +746,16 @@
       popup_country: buyer.country ?? lead.country,
       popup_lead_age_text: null,
       source_url: sourceUrl,
-      contact_enriched_at: new Date(now).toISOString()
+      contact_enriched_at: new Date(now).toISOString(),
+      purchase_id: outcome.purchaseId || null,
+      credit_balance: outcome.creditBalance,
+      contact_fields: buyer.contact_fields ?? []
     };
   }
   var BUY_CONCURRENCY = 3;
   var RETRY_BUY_SLOTS = 1;
   function createBuyQueue(slots, clock = () => Date.now(), retrySlots = RETRY_BUY_SLOTS) {
+    const fresh = [];
     const retry = [];
     let running = 0;
     let runningRetries = 0;
@@ -730,6 +777,9 @@
       });
     };
     const pump = () => {
+      while (fresh.length && clock() >= pausedUntil && running < slots) {
+        start(fresh.shift());
+      }
       while (retry.length && clock() >= pausedUntil && runningRetries < retrySlots && running < Math.max(1, slots - 1)) {
         start(retry.shift());
       }
@@ -741,17 +791,13 @@
         }
         return new Promise((resolve) => {
           const job = { run: task, resolve, retry: priority !== "fresh" };
-          if (job.retry) {
-            retry.push(job);
-            pump();
-          } else {
-            start(job);
-          }
+          (job.retry ? retry : fresh).push(job);
+          pump();
         });
       },
       pause(untilMs) {
         pausedUntil = Math.max(pausedUntil, untilMs);
-        for (const job of retry.splice(0)) {
+        for (const job of [...fresh.splice(0), ...retry.splice(0)]) {
           job.resolve(null);
         }
       },
@@ -759,7 +805,7 @@
         return running;
       },
       get queued() {
-        return retry.length;
+        return fresh.length + retry.length;
       }
     };
   }
@@ -786,7 +832,7 @@
     return parts.join(" \xB7 ");
   }
   function isPollRateLimited(result) {
-    return result.status === 429 || result.retryAfterSeconds !== null;
+    return isRateLimitStatus(result.status) || result.retryAfterSeconds !== null;
   }
   function nextSafetyBrake(previous, reason, retryAfterSeconds, now = Date.now()) {
     const recent = previous && now - previous.tripped_at < SAFETY_BRAKE_RESET_MS;
@@ -1051,6 +1097,28 @@
       return [];
     }
     return list.map((row) => row && typeof row === "object" ? parseBlApiRow(row) : null).filter((lead) => lead !== null);
+  }
+  function parseBlClosedLeads(payload) {
+    const list = payload?.DisplayList;
+    if (!Array.isArray(list)) {
+      return [];
+    }
+    const leads = [];
+    for (const row of list) {
+      if (!row || typeof row !== "object") {
+        continue;
+      }
+      const status = text2(row.PURCHASE_STATUS);
+      const liveRow = row.DATATYPE === void 0 || LIVE_DATATYPES.has(String(row.DATATYPE));
+      if (!status || status === "OPEN" || !liveRow) {
+        continue;
+      }
+      const api = parseBlApiRow({ ...row, PURCHASE_STATUS: "OPEN" });
+      if (api) {
+        leads.push({ ...api, closed_status: status });
+      }
+    }
+    return leads;
   }
   function parseExpiredBlDisplayData(payload) {
     const list = payload?.DisplayList;
@@ -1717,6 +1785,7 @@
         return;
       }
       void decideArrivedLeads(parseBlDisplayData(data.payload), "page").catch(() => void 0);
+      void trackClosedLeads(data.payload).catch(() => void 0);
       notePageListRequest(
         typeof data.status === "number" ? data.status : 200,
         typeof data.retryAfterSeconds === "number" ? data.retryAfterSeconds : null,
@@ -1794,6 +1863,8 @@
     const final = givesUp && !Number.isFinite(retry.nextAttemptAt);
     if (final) {
       localCaptures.delete(marker.client_event_id);
+      enrichedLeadIds.add(marker.client_event_id);
+      await persistEnrichedLeadId(marker.client_event_id);
     }
     const backendLeadId = markersByClientEventId.get(marker.client_event_id)?.backend_lead_id ?? marker.backend_lead_id;
     safeSendMessage({
@@ -1896,7 +1967,7 @@
   }
   function autoEnrichCapturedLeadMarkers(markers, priority = "retry") {
     const now = Date.now();
-    if (brakeOn(now)) {
+    if (brakeOn(now) || !canBuyInThisTab(now)) {
       return;
     }
     markers.filter((marker) => shouldAutoEnrichMarker(marker, now)).map((marker) => ({ marker, api: apiLeadForMarker(marker) })).filter((item) => item.api !== null).sort((first, second) => second.marker.synced_at.localeCompare(first.marker.synced_at)).forEach(({ marker, api }, index) => startBuy(marker, api, index + 1, priority));
@@ -2057,12 +2128,14 @@
   var SAFETY_BRAKE_RELOAD_STORAGE_KEY = "safetyBrakeReloadedFor";
   var POLL_LOCK_STALE_MS = 45e3;
   var POLL_IDLE_DELAY_MS = 1e3;
-  var BRIDGE_RESPONSE_TIMEOUT_MS = 2e4;
+  var BRIDGE_RESPONSE_TIMEOUT_MS = 3e4;
   var decidedLeadKeys = /* @__PURE__ */ new Map();
   var decidedLeadKeysWriteTimer;
   var apiPollerStarted = false;
   var apiPollTimer;
   var apiPollFailures = 0;
+  var apiPollHttpErrors = 0;
+  var MAX_POLL_HTTP_ERRORS = 3;
   var apiPollDueAt;
   var apiPollsInFlight = 0;
   var lastApiPollEndedAt = 0;
@@ -2420,6 +2493,18 @@
     const leads = result.ok ? parseBlDisplayData(result.json) : [];
     if (!result.ok || !listed) {
       lastApiPollPenalized = true;
+      apiPollHttpErrors = result.ok ? 0 : apiPollHttpErrors + 1;
+      if (apiPollHttpErrors >= MAX_POLL_HTTP_ERRORS) {
+        apiPollHttpErrors = 0;
+        const until = await tripSafetyBrake("list_http_errors", result.retryAfterSeconds);
+        await recordPollStatus({
+          ok: false,
+          status: result.status,
+          retry_after: result.retryAfterSeconds,
+          error: `IndiaMART pushed back, polling and buying paused until ${new Date(until).toISOString()}`
+        });
+        return until - Date.now();
+      }
       await recordPollStatus({
         ok: false,
         status: result.status,
@@ -2427,12 +2512,16 @@
       });
       return POLL_NOT_OK_DELAY_MS;
     }
+    apiPollHttpErrors = 0;
     apiLeadIndex.add(leads);
     const { recorded } = decidePolledLeads(leads, businessId, config, "poll", receivedAt);
+    sweepDeferredLeads(businessId, config);
+    void trackClosedLeads(result.json, receivedAt).catch(() => void 0);
     await recordPollStatus({
       ok: true,
       status: result.status,
       listed: leads.length,
+      unlisted_rows: result.json.DisplayList.length - leads.length,
       new_leads: recorded,
       ms: result.durationMs,
       // Which countries the list was asked for, or why it was not filtered by country.
@@ -2443,6 +2532,80 @@
     sendParkedEnrichments([...parkedEnrichments.keys()].map((id) => ({ client_event_id: id })));
     return nextPollDelayMs(pollGapMs);
   }
+  // Only a tab with the page hook can reach IndiaMART, and only one tab should buy. Every other tab
+  // still records what it sees; the owner picks up the purchase from the shared markers.
+  function canBuyInThisTab(now = Date.now()) {
+    const lock = pollLock;
+    const heldElsewhere = Boolean(lock?.owner) && lock.owner !== pollOwnerToken && typeof lock.at === "number" && now - lock.at < POLL_LOCK_STALE_MS;
+    return apiPollerStarted && !heldElsewhere;
+  }
+  function isBuyLeadPath(pathname) {
+    return /^\/bltxn(\/|$)/.test(pathname);
+  }
+  // Leads held back until the list confirms them. Without this, one that sold out first was never recorded.
+  var DEFERRED_LEAD_MAX_WAIT_MS = 2e4;
+  var deferredLeads = /* @__PURE__ */ new Map();
+  function deferLead(api, now) {
+    if (!deferredLeads.has(api.ofr_id)) {
+      deferredLeads.set(api.ofr_id, { api, since: now });
+    }
+    if (deferredLeads.size > MAX_DECIDED_LEAD_KEYS) {
+      deferredLeads.delete(deferredLeads.keys().next().value);
+    }
+  }
+  function sweepDeferredLeads(businessId, config, now = Date.now()) {
+    const due = [];
+    for (const [ofrId, entry] of deferredLeads) {
+      if (alreadyDecided(entry.api)) {
+        deferredLeads.delete(ofrId);
+      } else if (now - entry.since >= DEFERRED_LEAD_MAX_WAIT_MS) {
+        deferredLeads.delete(ofrId);
+        due.push(entry.api);
+      }
+    }
+    if (due.length) {
+      decidePolledLeads(due, businessId, config, "sweep");
+    }
+  }
+  // Kept out of the decided list on purpose: a lead that reopens must still be judged normally.
+  var closedLeadIds = /* @__PURE__ */ new Set();
+  async function trackClosedLeads(payload, receivedAt = Date.now()) {
+    const closed = parseBlClosedLeads(payload);
+    if (!closed.length) {
+      return 0;
+    }
+    storedMarkersLoad ??= loadStoredLeadDecisions().catch(() => void 0);
+    await storedMarkersLoad;
+    const context = captureContextFrom(captureState ?? await readCaptureState());
+    if ("idle" in context) {
+      return 0;
+    }
+    const now = Date.now();
+    const recorded = [];
+    for (const api of closed) {
+      if (alreadyDecided(api) || closedLeadIds.has(api.ofr_id)) {
+        continue;
+      }
+      closedLeadIds.add(api.ofr_id);
+      if (closedLeadIds.size > MAX_DECIDED_LEAD_KEYS) {
+        closedLeadIds.delete(closedLeadIds.values().next().value);
+      }
+      recorded.push({
+        ...apiLeadToCapturedLead(api, window.location.href, now),
+        local_decision: {
+          decision: "skipped",
+          skip_reason: "lead_not_open",
+          matched_positive_rule_ids: [],
+          explanation: { indiamart_status: api.closed_status },
+          config_version: context.config.version
+        }
+      });
+    }
+    if (recorded.length) {
+      void storeLeadsLocally(context.businessId, recorded);
+    }
+    return recorded.length;
+  }
   function decidePolledLeads(leads, businessId, config, source = "poll", receivedAt = Date.now()) {
     const sourceUrl = window.location.href;
     const now = Date.now();
@@ -2451,7 +2614,7 @@
     const stored = new Promise((resolve) => {
       settleStored = resolve;
     });
-    const buyNow = !brakeOn(now);
+    const buyNow = !brakeOn(now) && canBuyInThisTab(now);
     const fresh = leads.filter((api) => !alreadyDecided(api)).sort((first, second) => (second.posted_at_ms ?? 0) - (first.posted_at_ms ?? 0));
     const recorded = [];
     let undecided = 0;
@@ -2461,16 +2624,24 @@
       const decision = decideLeadLocally(lead, config, currentCaptureCounters(config, localCaptures.values()), now);
       if (!decision) {
         undecided += 1;
+        if (source === "sweep") {
+          deferLead(api, now);
+        }
         continue;
       }
       if (source === "push" && decision.decision !== "captured" && !skipProvenByPush(decision.skip_reason, api)) {
         deferred += 1;
+        deferLead(api, now);
         continue;
       }
-      const waitingForSignals = !api.contact_signals_known && stillWaitingForSignals(api.ofr_id, now);
+      const waitingForSignals = source !== "sweep" && !api.contact_signals_known && stillWaitingForSignals(api.ofr_id, now);
       if (waitingForSignals && decision.skip_reason === "contact_requirement_not_met") {
         deferred += 1;
+        deferLead(api, now);
         continue;
+      }
+      if (decision.decision === "skipped") {
+        decision.explanation = explainSkip(lead, config);
       }
       const firstSeenAt = contactSignalsMissingSince.get(api.ofr_id);
       contactSignalsMissingSince.delete(api.ofr_id);
@@ -2618,7 +2789,7 @@
     }).catch(() => void 0);
   }
   function startApiPoller() {
-    if (apiPollerStarted || window.top !== window || !/^\/bltxn\//.test(window.location.pathname)) {
+    if (apiPollerStarted || window.top !== window || !isBuyLeadPath(window.location.pathname)) {
       return;
     }
     apiPollerStarted = true;

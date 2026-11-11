@@ -2,6 +2,7 @@
 
 import Modal from "@/components/ui/Modal";
 import CountryFlag from "@/components/leads/CountryFlag";
+import LeadReason from "@/components/leads/LeadReason";
 import LeadStatus from "@/components/leads/LeadStatus";
 import { ContactPills } from "@/components/leads/Contacts";
 import { useApp } from "@/components/AppContext";
@@ -39,8 +40,8 @@ export default function LeadModal({ lead, onClose }) {
         {lead.quantity ? (
           <span className="inline-block rounded-full bg-accent-soft px-2 py-0.5 text-[11px] font-bold text-accent-dark">{lead.quantity}</span>
         ) : null}
-        {lead.filter_reason ? <span className="text-[13px] text-accent-dark">{lead.filter_reason}</span> : null}
       </div>
+      <LeadReason reason={lead.reason} full />
       <div className="grid grid-cols-[minmax(0,1fr)_minmax(260px,.85fr)] gap-3.5 max-[760px]:grid-cols-1">
         <DetailPanel
           title="Requirement"

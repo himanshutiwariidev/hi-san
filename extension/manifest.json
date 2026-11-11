@@ -39,7 +39,7 @@
   "content_scripts": [
     {
       "matches": [
-        "https://seller.indiamart.com/bltxn/*"
+        "https://seller.indiamart.com/bltxn*"
       ],
       "js": [
         "page-network-hook.js"
@@ -57,5 +57,5 @@
       "run_at": "document_end"
     }
   ],
-  "version": "1.0.14"
+  "version": "1.0.15"
 }

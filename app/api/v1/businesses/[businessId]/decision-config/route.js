@@ -11,19 +11,24 @@ export const GET = route(async (_request, { businessId }) => {
   const utcToday = new Date().toISOString().slice(0, 10);
   const startOfUtcDay = `${utcToday}T00:00:00.000Z`;
 
-  const capturedToday = db
-    .prepare("SELECT COUNT(*) n FROM leads WHERE business_id = ? AND status = 'retrieved' AND received_at >= ?")
-    .get(business.id, startOfUtcDay).n;
-
-  const keywordCountsRows = db
-    .prepare(
-      "SELECT matched_keyword, COUNT(*) n FROM leads WHERE business_id = ? AND status = 'retrieved' AND received_at >= ? AND matched_keyword IS NOT NULL GROUP BY matched_keyword"
-    )
+  // A purchase in progress uses up the daily limit too. A failed one gives its slot back.
+  const boughtToday = db
+    .prepare("SELECT matched_keyword, matched_rule_ids FROM leads WHERE business_id = ? AND status IN ('pending', 'retrieved') AND received_at >= ?")
     .all(business.id, startOfUtcDay);
+  const capturedToday = boughtToday.length;
 
+  // The extension looks these counts up by rule id. The keyword text is kept for older clients.
   const keywordCapturedCounts = {};
-  for (const row of keywordCountsRows) {
-    keywordCapturedCounts[row.matched_keyword] = row.n;
+  const countFor = (key) => {
+    keywordCapturedCounts[key] = (keywordCapturedCounts[key] ?? 0) + 1;
+  };
+  for (const row of boughtToday) {
+    if (row.matched_keyword) countFor(row.matched_keyword);
+    try {
+      for (const ruleId of JSON.parse(row.matched_rule_ids ?? "[]")) countFor(ruleId);
+    } catch {
+      // Unreadable ids only affect the per-keyword count.
+    }
   }
 
   const rawRules = db
@@ -43,6 +48,11 @@ export const GET = route(async (_request, { businessId }) => {
       maxLeadsPerDay: r.max_leads_per_day ?? null,
       allowedCountries: countries,
       allowedStates: states,
+      // The names the extension reads. Without them its per-keyword limits are silently ignored.
+      minimum_quantity: r.minimum_quantity ?? null,
+      max_leads_per_day: r.max_leads_per_day ?? null,
+      allowed_countries: countries,
+      allowed_states: states,
     };
   });
 
@@ -50,6 +60,8 @@ export const GET = route(async (_request, { businessId }) => {
     business_id: business.id,
     version: 1,
     requested_at: Date.now(),
+    // Tells the extension this server stores buyer_phone / buyer_email, so replaying saved contacts is safe.
+    features: { buyer_contact_fields: true },
     today: {
       utc_date: utcToday,
       captured_count: capturedToday,

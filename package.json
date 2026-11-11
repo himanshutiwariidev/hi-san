@@ -1,11 +1,13 @@
 {
   "name": "hisan-bot",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "private": true,
   "scripts": {
     "dev": "NODE_OPTIONS=--disable-warning=ExperimentalWarning next dev",
     "build": "NODE_OPTIONS=--disable-warning=ExperimentalWarning next build --webpack",
-    "start": "NODE_OPTIONS=--disable-warning=ExperimentalWarning next start"
+    "start": "NODE_OPTIONS=--disable-warning=ExperimentalWarning next start",
+    "test": "NODE_OPTIONS=--disable-warning=ExperimentalWarning node --test --test-timeout=30000 tests/*.test.mjs",
+    "test:e2e": "NODE_OPTIONS=--disable-warning=ExperimentalWarning node tests/e2e/browser.e2e.mjs"
   },
   "dependencies": {
     "next": "^16.4.3",

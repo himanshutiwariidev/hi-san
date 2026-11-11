@@ -10,12 +10,12 @@ import { inputClass } from "@/components/ui/fields";
 import { Table, Th, Td } from "@/components/ui/Table";
 import CountryFlag from "@/components/leads/CountryFlag";
 import LeadModal from "@/components/leads/LeadModal";
+import LeadReason from "@/components/leads/LeadReason";
 import LeadStatus from "@/components/leads/LeadStatus";
 import { ContactPills } from "@/components/leads/Contacts";
 import { useApp } from "@/components/AppContext";
 import { apiClient } from "@/lib/api";
 import { formatDateTime } from "@/lib/format";
-import { formatSkipReason } from "@/lib/geo";
 import { useResource } from "@/lib/useResource";
 
 const DAY = 24 * 3600 * 1000;
@@ -44,6 +44,7 @@ function LeadsView() {
   const [keyword, setKeyword] = useState("");
   const [country, setCountry] = useState("");
   const [contact, setContact] = useState("");
+  const [reason, setReason] = useState("");
   const [selected, setSelected] = useState(null);
 
   const days = ranges.find((r) => r.value === range).days;
@@ -84,6 +85,9 @@ function LeadsView() {
     return [...map.entries()].filter(([key]) => key).sort((a, b) => a[1].name.localeCompare(b[1].name));
   }, [inRange]);
 
+  const reasonOptions = useMemo(() => [...new Set(inRange.map((l) => l.reason?.label).filter(Boolean))].sort(), [inRange]);
+  const pendingCount = useMemo(() => inRange.filter((l) => l.status === "pending").length, [inRange]);
+
   const rows = useMemo(() => {
     const q = query.trim().toLowerCase();
     return inRange.filter(
@@ -92,14 +96,15 @@ function LeadsView() {
         (!keyword || l.matched_keyword === keyword) &&
         (!country || (l.country.code || l.country.name) === country) &&
         (!contact || (contact === "whatsapp" ? l.contacts.whatsapp !== "missing" : Boolean(l[contact]))) &&
+        (!reason || l.reason?.label === reason) &&
         (!q || `${l.title} ${l.buyer_name ?? ""} ${l.company ?? ""} ${l.email ?? ""} ${l.phone ?? ""}`.toLowerCase().includes(q))
     );
-  }, [inRange, statusParam, keyword, country, contact, query]);
+  }, [inRange, statusParam, keyword, country, contact, reason, query]);
 
   function exportCsv() {
-    const header = ["indiamart_id", "title", "quantity", "unit", "keyword", "buyer", "company", "city", "state", "country", "email", "phone", "gst_verified", "status", "decision", "reason", "received_at"];
+    const header = ["indiamart_id", "title", "quantity", "unit", "keyword", "buyer", "company", "city", "state", "country", "email", "phone", "gst_verified", "status", "decision", "reason", "received_at", "reason_label", "reason_type", "reason_detail"];
     const lines = rows.map((l) =>
-      [l.external_id, l.title, l.quantity, l.unit, l.matched_keyword, l.buyer_name, l.company, l.city, l.state, l.country.name, l.email, l.phone, l.gst_verified ? "Yes" : "No", l.status, l.decision, l.filter_reason, l.received_at]
+      [l.external_id, l.title, l.quantity, l.unit, l.matched_keyword, l.buyer_name, l.company, l.city, l.state, l.country.name, l.email, l.phone, l.gst_verified ? "Yes" : "No", l.status, l.decision, l.filter_reason, l.received_at, l.reason?.label, l.reason?.group, l.reason?.detail]
         .map((v) => `"${String(v ?? "").replace(/"/g, '""')}"`)
         .join(",")
     );
@@ -143,6 +148,12 @@ function LeadsView() {
         })}
       </div>
 
+      {pendingCount > 0 ? (
+        <p className="m-0 text-[13px] text-muted">
+          {pendingCount} {pendingCount === 1 ? "lead is" : "leads are"} still being bought, so {pendingCount === 1 ? "it is" : "they are"} in Total leads but not yet in Retrieved or Not retrieved.
+        </p>
+      ) : null}
+
       <div className="flex gap-2 overflow-x-auto pb-0.5">
         {ranges.map((r) => (
           <button
@@ -183,15 +194,22 @@ function LeadsView() {
             <option value="phone">Has phone</option>
             <option value="whatsapp">Has WhatsApp</option>
           </select>
+          <select value={reason} onChange={(e) => setReason(e.target.value)} className={inputClass}>
+            <option value="">All reasons</option>
+            {reasonOptions.map((r) => (
+              <option key={r}>{r}</option>
+            ))}
+          </select>
         </div>
 
-        <Table>
+        <Table minWidth="min-w-[980px]">
           <thead>
             <tr>
               <Th>Buyer</Th>
               <Th>Requirement</Th>
               <Th>Contacts</Th>
               <Th>Status</Th>
+              <Th>Reason</Th>
               <Th>Received</Th>
               <Th />
             </tr>
@@ -202,7 +220,7 @@ function LeadsView() {
                 <Td>
                   <div className="grid max-w-[500px] items-start gap-1.5">
                     <div className="flex items-center gap-2">
-                      <strong className="text-[15px] leading-tight text-text">{lead.buyer_name ?? (lead.status === "retrieved" ? "Buyer" : "Not bought")}</strong>
+                      <strong className="text-[15px] leading-tight text-text">{lead.buyer_name ?? { retrieved: "Buyer", pending: "Buying…" }[lead.status] ?? "Not bought"}</strong>
                       {lead.gst_verified ? (
                         <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-bold text-emerald-800">GST</span>
                       ) : null}
@@ -240,7 +258,9 @@ function LeadsView() {
                 </Td>
                 <Td>
                   <LeadStatus status={lead.status} />
-                  {lead.filter_reason ? <span className="mt-1 block text-xs font-semibold text-accent-dark">{formatSkipReason(lead.filter_reason)}</span> : null}
+                </Td>
+                <Td>
+                  <LeadReason reason={lead.reason} />
                 </Td>
                 <Td className="whitespace-nowrap text-[13px]">{formatDateTime(lead.received_at)}</Td>
                 <Td>

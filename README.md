@@ -20,6 +20,20 @@ Data is stored in SQLite at `data/hisan-bot.db`. Set `DATABASE_PATH` to put it e
 3. Log in to IndiaMART and open BuyLeads (`seller.indiamart.com/bltxn`). Keep the tab open.
 4. In the popup, turn on **Auto-buy running** with **Dry run** on. Check that leads are read correctly, then turn Dry run off.
 
+## Update the extension
+
+Extract the new version over the same folder and press **Reload** on `chrome://extensions`. Do not remove it or load another folder: an unpacked extension's storage is tied to its folder, and purchases waiting to sync live there. Deploy the server before updating the extension.
+
+## Test
+
+```bash
+npm run build
+npm test            # unit and API tests against a throwaway database
+npm run test:e2e    # the real extension in Chromium against a fake IndiaMART (needs Playwright's Chromium)
+```
+
+No test contacts IndiaMART or the live dashboard.
+
 ## How a lead is decided (`lib/server/engine.js`)
 
 A lead is bought only if all of these are true:

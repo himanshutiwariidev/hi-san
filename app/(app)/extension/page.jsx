@@ -137,6 +137,9 @@ export default function ExtensionPage() {
                 </a>
               </div>
               Extract the zip, open <code className="rounded bg-surface-muted px-1">chrome://extensions</code>, turn on <strong>Developer mode</strong>, click <strong>Load unpacked</strong>, and select the extracted folder.
+              <span className="mt-2 block">
+                <strong>Updating?</strong> Extract the new zip over the same folder, then press <strong>Reload</strong> on the extension. Do not remove it or load a different folder: buyer contacts waiting to sync are stored inside it.
+              </span>
             </Step>
             <Step n={2} title="Connect it">
               In the extension&apos;s settings, paste the dashboard URL and API key from this page, then press <strong>Save and test connection</strong>.

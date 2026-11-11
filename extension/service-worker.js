@@ -6981,7 +6981,37 @@ async function syncDecisionConfig() {
       return;
     }
     await chrome.storage.local.set({ [DECISION_CONFIG_STORAGE_KEY]: { ...config, requested_at: requestedAt } });
+    if (config.features?.buyer_contact_fields) {
+      void replaySavedBuyerContacts().catch(() => void 0);
+    }
   } catch {
+  }
+}
+// Servers before this fix threw away the buyer's phone and email, but the outbox still holds every original
+// payload. Once a server says it can store them, each saved one is sent again, one time only.
+var CONTACT_REPLAY_DONE_KEY = "buyerContactReplayDone";
+var contactReplayStarted = false;
+async function replaySavedBuyerContacts() {
+  if (contactReplayStarted) {
+    return 0;
+  }
+  contactReplayStarted = true;
+  try {
+    const state = await chrome.storage.local.get(CONTACT_REPLAY_DONE_KEY);
+    if (state[CONTACT_REPLAY_DONE_KEY]) {
+      return 0;
+    }
+    const saved = await outboxDb.enrichments.where("state").equals("ACKED").toArray();
+    for (const record of saved) {
+      await transitionLeadEnrichment(outboxDb, record.enrichment_id, "PENDING");
+    }
+    await chrome.storage.local.set({ [CONTACT_REPLAY_DONE_KEY]: { at: (/* @__PURE__ */ new Date()).toISOString(), count: saved.length } });
+    if (saved.length) {
+      void syncPendingLeadEnrichments();
+    }
+    return saved.length;
+  } finally {
+    contactReplayStarted = false;
   }
 }
 async function syncPollSettings() {
