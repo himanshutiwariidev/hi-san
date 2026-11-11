@@ -1,13 +1,17 @@
 // Real extension + real Chromium + real server, against the fake IndiaMART. Chromium's DNS is locked to the fake
-// site and localhost, so this cannot reach IndiaMART or the live dashboard. Takes about two minutes.
+// site and localhost, so this cannot reach IndiaMART or the live dashboard. Takes about five minutes.
 //   npm run build && node tests/e2e/browser.e2e.mjs
 // Needs a Chromium that allows --load-extension (Playwright's works). Set E2E_CHROMIUM to use another one.
+// A look-alike extension (the same page script under the names every build of this engine once shared) is always
+// on the page, so a request of ours that somebody else's page script also runs shows up as a doubled request.
+// E2E_EXTRA_EXTENSIONS=/path/a,/path/b loads more unpacked extensions beside ours, exactly as they are.
+// E2E_PAGE_PATH changes the BuyLeads address the tab opens (default /bltxn?pref=relevant).
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { imRow } from "../helpers/extension.mjs";
+import { channelNames, EXTENSION_DIR, imRow, readBundle } from "../helpers/extension.mjs";
 import { ADMIN, startServer } from "../helpers/server.mjs";
 import { startFakeIndiaMart } from "./fake-indiamart.mjs";
 
@@ -16,6 +20,8 @@ const APP_PORT = 3476;
 const IM_PORT = 3478;
 const DEBUG_PORT = 9333;
 const shots = process.env.E2E_SCREENSHOTS;
+const PAGE_PATH = process.env.E2E_PAGE_PATH ?? "/bltxn?pref=relevant";
+const EXTRA_EXTENSIONS = (process.env.E2E_EXTRA_EXTENSIONS ?? "").split(",").map((dir) => dir.trim()).filter(Boolean);
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function findChromium() {
@@ -90,7 +96,7 @@ const openTab = (url) => fetch(`http://127.0.0.1:${DEBUG_PORT}/json/new?${encode
 
 // Same code, pointed at the local server. Nothing else differs from what ships.
 function prepareExtension(dir) {
-  fs.cpSync(path.join(ROOT, "extension"), dir, { recursive: true });
+  fs.cpSync(EXTENSION_DIR, dir, { recursive: true });
   const local = `http://127.0.0.1:${APP_PORT}`;
   for (const file of ["service-worker.js", "popup.js", "sidepanel.js"]) {
     const target = path.join(dir, file);
@@ -100,6 +106,22 @@ function prepareExtension(dir) {
   const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
   manifest.host_permissions.push(`${local}/*`);
   fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+}
+
+// Another extension built from the same engine: our page script, listening on the names they all used to share.
+function prepareLookAlike(dir) {
+  fs.mkdirSync(dir, { recursive: true });
+  const ours = channelNames("page-network-hook.js");
+  const shared = { request: "im-leads-bridge-request", response: "im-leads-bridge-response", pageData: "im-leads-page-hook" };
+  let hook = readBundle("page-network-hook.js");
+  for (const key of Object.keys(shared)) hook = hook.replaceAll(ours[key], shared[key]);
+  fs.writeFileSync(path.join(dir, "page-network-hook.js"), hook);
+  fs.writeFileSync(path.join(dir, "manifest.json"), JSON.stringify({
+    manifest_version: 3,
+    name: "Look-alike engine (test only)",
+    version: "1.0.0",
+    content_scripts: [{ matches: ["https://seller.indiamart.com/bltxn*"], js: ["page-network-hook.js"], run_at: "document_start", world: "MAIN" }],
+  }));
 }
 
 const row = (id, overrides = {}) => imRow({ ETO_OFR_ID: String(id), ...overrides });
@@ -132,17 +154,39 @@ try {
 
   const extension = path.join(work, "extension");
   prepareExtension(extension);
+  const lookAlike = path.join(work, "look-alike");
+  prepareLookAlike(lookAlike);
+  const extras = EXTRA_EXTENSIONS.map((dir, index) => {
+    const copy = path.join(work, `extra-${index}`);
+    fs.cpSync(dir, copy, { recursive: true });
+    return copy;
+  });
+  const loaded = [extension, lookAlike, ...extras].join(",");
   browser = launch([
-    `--load-extension=${extension}`, `--disable-extensions-except=${extension}`, "--ignore-certificate-errors",
+    `--load-extension=${loaded}`, `--disable-extensions-except=${loaded}`, "--ignore-certificate-errors",
     `--host-resolver-rules=MAP seller.indiamart.com 127.0.0.1:${IM_PORT}, MAP * ~NOTFOUND, EXCLUDE 127.0.0.1`,
   ], path.join(work, "profile"));
 
-  const worker = await until(async () => (await debugList()).find((target) => target.type === "service_worker" && target.url.endsWith("/service-worker.js")), 20000, "service worker");
-  check("the service worker starts in a real browser", Boolean(worker), worker?.url.split("/").pop());
-  if (!worker) throw new Error(`no service worker: ${(await debugList().catch(() => [])).map((target) => target.url).join(", ")}`);
-  const extensionId = new URL(worker.url).host;
   // Read state through the worker: Chromium freezes a background tab, and the worker stays awake.
-  const sw = await devtools(worker.webSocketDebuggerUrl);
+  let sw = null;
+  let extensionId = "";
+  const enabled = new Set(["Look-alike engine (test only)"]);
+  await until(async () => {
+    for (const target of (await debugList()).filter((candidate) => candidate.type === "service_worker" && candidate.url.endsWith("/service-worker.js"))) {
+      const session = await devtools(target.webSocketDebuggerUrl);
+      const name = await session.evaluate("chrome.runtime.getManifest().name");
+      enabled.add(name);
+      if (!sw && name.startsWith("Hi-San")) {
+        sw = session;
+        extensionId = new URL(target.url).host;
+      } else {
+        session.close();
+      }
+    }
+    return sw && enabled.size >= 2 + extras.length;
+  }, 20000, "service worker");
+  check("the service worker starts in a real browser", Boolean(sw), [...enabled].join(" + "));
+  if (!sw) throw new Error(`no service worker: ${(await debugList().catch(() => [])).map((target) => target.url).join(", ")}`);
 
   const panelTarget = await openTab(`chrome-extension://${extensionId}/options.html`);
   const panel = await devtools(panelTarget.webSocketDebuggerUrl);
@@ -188,11 +232,11 @@ try {
   }, 40000, "contact replay");
   check("a saved buyer contact is restored from the real outbox", restored?.phone === "+1 5556000000" && restored?.email === "old@example.com" && restored?.company === "Old Co");
 
-  const pageTarget = await openTab("https://seller.indiamart.com/bltxn?pref=relevant");
+  const pageTarget = await openTab(`https://seller.indiamart.com${PAGE_PATH}`);
   const page = await devtools(pageTarget.webSocketDebuggerUrl);
 
   const bought = await until(reached(1001, "retrieved"), 25000, "lead 1001 retrieved");
-  check("the bot runs on /bltxn without a trailing slash", Boolean(bought));
+  check(`the bot runs on ${PAGE_PATH.split("?")[0]}`, Boolean(bought));
   check("1. a visible lead is detected and 4. retrieved, with contacts", bought?.phone === "+1 5551001" && bought?.email === "buyer1001@example.com" && bought?.company === "Company 1001", bought?.phone);
   check("the keyword and purchase id are saved", bought?.matched_keyword === "tadalafil" && bought?.purchase_id === "P1001");
 
@@ -234,9 +278,16 @@ try {
   const buyAt = im.state.buys.find((buy) => buy.ofrid === "1010")?.at;
   check("a pushed lead is bought straight away", Boolean(realtime) && buyAt - sentAt < 1000, `${buyAt - sentAt} ms`);
 
+  // A keyword added on the dashboard while the IndiaMART tab stays open.
+  await server.call("POST", `/businesses/${business}/keyword-rules`, { keyword: "sildenafil", match: "contains" });
+  const synced = await until(() => sw.evaluate(`chrome.storage.local.get("decisionConfig").then((state) => state.decisionConfig?.keyword_rules?.length === 2)`), 45000, "the new keyword reaching the extension");
+  im.state.rows.push(row(1012, { ETO_OFR_TITLE: "Sildenafil Tablets" }));
+  const newKeyword = synced ? await until(reached(1012, "retrieved"), 20000, "lead 1012") : null;
+  check("a keyword added on the dashboard works without reloading the IndiaMART tab", Boolean(newKeyword), newKeyword?.matched_keyword ?? (await leadFor(1012))?.reason?.label ?? "");
+
   const counts = {};
   for (const buy of im.state.buys) counts[buy.ofrid] = (counts[buy.ofrid] ?? 0) + 1;
-  check("no lead was bought twice", Object.values(counts).every((count) => count === 1), `${im.state.buys.length} buys`);
+  check("every purchase reached IndiaMART once, with other extensions on the page", Object.values(counts).every((count) => count === 1), `${im.state.buys.length} requests for ${Object.keys(counts).length} leads`);
   check("closed and filtered leads were never bought", !counts["1003"] && !counts["1004"] && !counts["1005"] && !counts["1006"]);
   const gaps = im.state.lists.slice(1).map((entry, index) => entry.at - im.state.lists[index].at);
   const perMinute = im.state.lists.filter((entry) => entry.at > Date.now() - 60000).length;
@@ -263,11 +314,19 @@ try {
   const all = await leads();
   const by = (status) => all.filter((lead) => lead.status === status).length;
   check("10. the totals add up", all.length === by("retrieved") + by("filtered") + by("not_retrieved") + by("pending"), `${all.length} = ${by("retrieved")} + ${by("filtered")} + ${by("not_retrieved")} + ${by("pending")}`);
-  check("every detected lead is accounted for", [1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011].every((id) => all.some((lead) => lead.client_event_id.endsWith(`im-ofr:${id}`))));
+  check("every detected lead is accounted for", [1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012].every((id) => all.some((lead) => lead.client_event_id.endsWith(`im-ofr:${id}`))));
 
   const audit = await sw.evaluate(fs.readFileSync(path.join(ROOT, "tools/audit-saved-contacts.js"), "utf8"));
   const expectedPurchases = im.state.buys.filter((buy) => !im.state.lostIds.has(buy.ofrid)).length + 1;
   check("the audit tool reads a real outbox", audit?.purchases === expectedPurchases && audit?.with_phone === expectedPurchases && audit?.with_neither === 0, JSON.stringify(audit));
+
+  const comparison = await sw.evaluate(fs.readFileSync(path.join(ROOT, "tools/compare-bots.js"), "utf8"));
+  const comparisonText = JSON.stringify(comparison ?? {});
+  check(
+    "the comparison tool reports this bot's purchases and no buyer contacts",
+    comparison?.bot?.startsWith("Hi-San") && comparison.purchases.bought === expectedPurchases - 1 && comparison.purchases.lost === 1 && comparison.lost_because.lost === 1 && comparison.filters.keywords === 2 && !/@example\.com|\+1 555|Buyer \d/.test(comparisonText),
+    JSON.stringify(comparison?.purchases)
+  );
 
   const sync = await sw.evaluate(`chrome.storage.local.get(["lastSyncError", "lastLeadEnrichmentError", "buyerContactReplayDone"])`);
   check("the extension reports no sync errors", !sync.lastSyncError && !sync.lastLeadEnrichmentError, JSON.stringify(sync).slice(0, 120));

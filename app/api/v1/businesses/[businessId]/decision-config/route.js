@@ -1,7 +1,16 @@
+import { createHash } from "node:crypto";
 import { db } from "@/lib/server/db";
 import { requireBusiness, requireUser } from "@/lib/server/auth";
 import { route } from "@/lib/server/http";
 import { parseFilterSettings } from "@/lib/server/serializers";
+
+// An open IndiaMART tab keeps the keyword rules it loaded until this number changes. It was always 1, so a
+// keyword that was added, edited, switched off or deleted reached the tab only after the page was reloaded.
+function rulesVersion(rules) {
+  const hash = createHash("sha1");
+  for (const rule of [...rules].sort((a, b) => String(a.id).localeCompare(String(b.id)))) hash.update(`${JSON.stringify(rule)}\n`);
+  return parseInt(hash.digest("hex").slice(0, 12), 16) + 2;
+}
 
 export const GET = route(async (_request, { businessId }) => {
   const user = await requireUser();
@@ -58,7 +67,7 @@ export const GET = route(async (_request, { businessId }) => {
 
   return Response.json({
     business_id: business.id,
-    version: 1,
+    version: rulesVersion(keywordRules),
     requested_at: Date.now(),
     // Tells the extension this server stores buyer_phone / buyer_email, so replaying saved contacts is safe.
     features: { buyer_contact_fields: true },

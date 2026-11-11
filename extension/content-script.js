@@ -132,6 +132,18 @@
     const words = normalizedKeyword.split(" ").filter((word) => word.length >= 3 && !ANY_WORD_STOP_WORDS.has(word));
     return words.length ? [...new Set(words)] : [normalizedKeyword];
   }
+  function wordBoundaryMatcher(word, suffix = "") {
+    let pattern;
+    return (text3) => {
+      if (!text3.includes(word)) {
+        return false;
+      }
+      if (pattern === void 0) {
+        pattern = keywordPattern(word, suffix);
+      }
+      return Boolean(pattern?.test(text3));
+    };
+  }
   function keywordMatcher(keyword, matchType = "whole_word", stemmed = false, negative = false) {
     const normalized = normalizeText(keyword);
     if (!normalized) {
@@ -141,15 +153,14 @@
       if (negative) {
         return (text3) => text3.includes(normalized);
       }
-      const words = anyWordKeywords(normalized).map((word) => keywordPattern(word));
-      return (text3) => words.some((pattern2) => Boolean(pattern2?.test(text3)));
+      const words = anyWordKeywords(normalized).map((word) => wordBoundaryMatcher(word));
+      return (text3) => words.some((matches) => matches(text3));
     }
     if (matchType === "all_words") {
-      const words = normalized.split(" ").map((word) => keywordPattern(word, stemmed ? NEGATIVE_STEM_SUFFIX : ""));
-      return (text3) => words.every((pattern2) => Boolean(pattern2?.test(text3)));
+      const words = normalized.split(" ").map((word) => wordBoundaryMatcher(word, stemmed ? NEGATIVE_STEM_SUFFIX : ""));
+      return (text3) => words.every((matches) => matches(text3));
     }
-    const pattern = keywordPattern(normalized, stemmed ? NEGATIVE_STEM_SUFFIX : "");
-    return (text3) => Boolean(pattern?.test(text3));
+    return wordBoundaryMatcher(normalized, stemmed ? NEGATIVE_STEM_SUFFIX : "");
   }
   function isInvalidLeadTitle(title) {
     return !(title ?? "").trim() || LEAD_AGE_ONLY_TITLE.test(title ?? "");
@@ -544,8 +555,8 @@
   }
 
   // src/fast-buy.ts
-  var BRIDGE_REQUEST_EVENT = "im-leads-bridge-request";
-  var BRIDGE_RESPONSE_EVENT = "im-leads-bridge-response";
+  var BRIDGE_REQUEST_EVENT = "hisan-bot-bridge-request";
+  var BRIDGE_RESPONSE_EVENT = "hisan-bot-bridge-response";
   function encodeBridgeRequest(request) {
     return JSON.stringify(request);
   }
@@ -825,8 +836,11 @@
       if (heldMs >= 20) {
         parts.push(`held ${duration(heldMs)} for IndiaMART's contact flags`);
       }
-      const queued = timing.startedAt !== void 0 ? timing.startedAt - timing.receivedAt : 0;
-      parts.push(`buy sent ${duration(timing.sentAt - timing.receivedAt)} after${queued >= 20 ? ` (${duration(queued)} waiting for a buy slot)` : ""}`);
+      const queuedAt = timing.queuedAt ?? timing.receivedAt;
+      const deciding = queuedAt - timing.receivedAt;
+      const waiting = timing.startedAt !== void 0 ? timing.startedAt - queuedAt : 0;
+      const delays = [deciding >= 20 ? `${duration(deciding)} deciding` : "", waiting >= 20 ? `${duration(waiting)} waiting for a buy slot` : ""].filter(Boolean);
+      parts.push(`buy sent ${duration(timing.sentAt - timing.receivedAt)} after${delays.length ? ` (${delays.join(", ")})` : ""}`);
     }
     parts.push(`IndiaMART answered in ${duration(timing.answeredAt - timing.sentAt)}`);
     return parts.join(" \xB7 ");
@@ -951,7 +965,7 @@
   }
 
   // src/indiamart-api-adapter.ts
-  var BL_DISPLAY_DATA_SOURCE = "im-leads-page-hook";
+  var BL_DISPLAY_DATA_SOURCE = "hisan-bot-page-hook";
   var BL_DISPLAY_DATA_MESSAGE = "IM_BL_DISPLAY_DATA";
   function text2(value) {
     if (value === null || value === void 0) {
@@ -1894,7 +1908,7 @@
     }
     return apiLeadIndex.get(marker.client_event_id.slice("im-ofr:".length));
   }
-  async function buyCapturedLead(marker, api, position, stored = Promise.resolve(true), receivedAt, firstSeenAt) {
+  async function buyCapturedLead(marker, api, position, stored = Promise.resolve(true), receivedAt, firstSeenAt, queuedAt) {
     const startedAt = Date.now();
     const state = captureState ?? await readCaptureState();
     if (!state || !isBotRunning(state) || !billingAllows(state) || enrichedLeadIds.has(marker.client_event_id) || brakeOn()) {
@@ -1902,8 +1916,8 @@
     }
     const sentAt = Date.now();
     const outcome = parseBuyResult(await bridgeRequest("IM_BL_BUY", buildBuyPayload(api, "", position)));
-    const timing = buyTimingNote({ postedAtMs: api.posted_at_ms, receivedAt, firstSeenAt, startedAt, sentAt, answeredAt: Date.now() });
-    recordBuyTiming(api, outcome, receivedAt, startedAt, sentAt, firstSeenAt);
+    const timing = buyTimingNote({ postedAtMs: api.posted_at_ms, receivedAt, firstSeenAt, queuedAt, startedAt, sentAt, answeredAt: Date.now() });
+    recordBuyTiming(api, outcome, receivedAt, startedAt, sentAt, firstSeenAt, queuedAt);
     if (!await stored) {
       if (outcome.kind === "bought") {
         const enrichment = enrichmentFromBuy(api, outcome, window.location.href);
@@ -1946,7 +1960,7 @@
     }
     return outcome;
   }
-  function recordBuyTiming(api, outcome, receivedAt, startedAt, sentAt, firstSeenAt) {
+  function recordBuyTiming(api, outcome, receivedAt, startedAt, sentAt, firstSeenAt, queuedAt) {
     void safeStorageSet({
       lastBuyTiming: {
         ofr_id: api.ofr_id,
@@ -1955,6 +1969,8 @@
         held_for_contact_flags_ms: receivedAt === void 0 || firstSeenAt === void 0 ? null : receivedAt - firstSeenAt,
         received_to_sent_ms: receivedAt === void 0 ? null : sentAt - receivedAt,
         queued_ms: receivedAt === void 0 ? null : startedAt - receivedAt,
+        decide_ms: receivedAt === void 0 || queuedAt === void 0 ? null : queuedAt - receivedAt,
+        slot_wait_ms: queuedAt === void 0 ? null : startedAt - queuedAt,
         buy_ms: Date.now() - sentAt,
         at: (/* @__PURE__ */ new Date()).toISOString()
       }
@@ -1962,8 +1978,9 @@
   }
   function startBuy(marker, api, position, priority, stored, receivedAt, firstSeenAt) {
     const id = marker.client_event_id;
+    const queuedAt = Date.now();
     queuedEnrichmentIds.add(id);
-    void buyQueue.enqueue(() => buyCapturedLead(marker, api, position, stored, receivedAt, firstSeenAt), priority).finally(() => queuedEnrichmentIds.delete(id));
+    void buyQueue.enqueue(() => buyCapturedLead(marker, api, position, stored, receivedAt, firstSeenAt, queuedAt), priority).finally(() => queuedEnrichmentIds.delete(id));
   }
   function autoEnrichCapturedLeadMarkers(markers, priority = "retry") {
     const now = Date.now();
@@ -2456,7 +2473,7 @@
     if ("idle" in context) {
       return pollIdle(context.idle);
     }
-    const { businessId, config } = context;
+    let { businessId, config } = context;
     await loadPollSharedState();
     if (safetyBrake && brakeOn()) {
       lastApiPollPenalized = true;
@@ -2514,6 +2531,12 @@
     }
     apiPollHttpErrors = 0;
     apiLeadIndex.add(leads);
+    // The request can wait several seconds for a slot. Decide with the rules as they are now, not as they were when it was sent.
+    const latest = captureContextFrom(captureState ?? await readCaptureState());
+    if ("idle" in latest) {
+      return pollIdle(latest.idle);
+    }
+    ({ businessId, config } = latest);
     const { recorded } = decidePolledLeads(leads, businessId, config, "poll", receivedAt);
     sweepDeferredLeads(businessId, config);
     void trackClosedLeads(result.json, receivedAt).catch(() => void 0);

@@ -3,8 +3,8 @@
   // src/fast-buy.ts
   var BL_DISPLAY_DATA_URL = "https://seller.indiamart.com/blreact/getBLDisplayData";
   var BL_CONTACT_BUY_URL = "https://seller.indiamart.com/blreact/contactBuyNow";
-  var BRIDGE_REQUEST_EVENT = "im-leads-bridge-request";
-  var BRIDGE_RESPONSE_EVENT = "im-leads-bridge-response";
+  var BRIDGE_REQUEST_EVENT = "hisan-bot-bridge-request";
+  var BRIDGE_RESPONSE_EVENT = "hisan-bot-bridge-response";
   var BRIDGE_REQUEST_TYPES = /* @__PURE__ */ new Set(["IM_BL_FETCH", "IM_BL_BUY", "IM_BL_EXPIRED_FETCH", "IM_BL_MARK_SHORTLIST"]);
   function decodeBridgeRequest(detail) {
     if (typeof detail !== "string") {
@@ -86,7 +86,7 @@ ${body}`;
   var EXPIRED_LOCK_STALE_MS = 3 * 6e4;
 
   // src/indiamart-api-adapter.ts
-  var BL_DISPLAY_DATA_SOURCE = "im-leads-page-hook";
+  var BL_DISPLAY_DATA_SOURCE = "hisan-bot-page-hook";
   var BL_DISPLAY_DATA_MESSAGE = "IM_BL_DISPLAY_DATA";
   function isBlDisplayDataUrl(url) {
     return /\/blreact\/getBLDisplayData\b/i.test(url);

@@ -424,6 +424,31 @@ test("a keyword limited to a minimum quantity is enforced", async () => {
   assert.equal(local.skip_reason, "quantity_below_minimum");
 });
 
+test("the rules version changes whenever a keyword rule changes, and only then", async () => {
+  const version = async () => (await server.call("GET", `/businesses/${business}/decision-config`)).data.version;
+  const start = await version();
+  assert.ok(Number.isSafeInteger(start) && start > 1, "never the old constant 1, so tabs already open take the current rules once");
+  assert.equal(await version(), start, "an unchanged list keeps its version, so the extension keeps its compiled rules");
+
+  const created = await server.call("POST", `/businesses/${business}/keyword-rules`, { keyword: "letrozole", match: "contains" });
+  const added = await version();
+  assert.notEqual(added, start, "added");
+
+  await server.call("PATCH", `/businesses/${business}/keyword-rules/${created.data.id}`, { keyword: "letrozole tablets" });
+  const edited = await version();
+  assert.notEqual(edited, added, "edited");
+
+  await server.call("PATCH", `/businesses/${business}/keyword-rules/${created.data.id}`, { enabled: false });
+  const disabled = await version();
+  assert.notEqual(disabled, edited, "switched off");
+  assert.equal(disabled, start, "the same rules give the same version");
+
+  await server.call("PATCH", `/businesses/${business}/keyword-rules/${created.data.id}`, { enabled: true });
+  assert.equal(await version(), edited);
+  assert.equal((await server.call("DELETE", `/businesses/${business}/keyword-rules/${created.data.id}`)).status, 204);
+  assert.equal(await version(), start, "deleted");
+});
+
 test("the totals always add up, with nothing counted twice", async () => {
   const leads = await allLeads();
   const by = (status) => leads.filter((lead) => lead.status === status).length;

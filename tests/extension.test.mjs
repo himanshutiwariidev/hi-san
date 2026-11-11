@@ -2,7 +2,11 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { test } from "node:test";
-import { imBuyAnswer, imRow, loadContentScript, plain, readBundle } from "./helpers/extension.mjs";
+import { channelNames, imBuyAnswer, imRow, loadContentScript, loadPageHook, plain, readBundle } from "./helpers/extension.mjs";
+
+const channels = channelNames();
+// What every extension built from the same engine used before, and what Supermine still uses.
+const SHARED_NAMES = { request: "im-leads-bridge-request", response: "im-leads-bridge-response", pageData: "im-leads-page-hook" };
 
 const baseConfig = (settings = {}, rules = [{ id: "r1", type: "positive", keyword: "tadalafil", match_type: "contains" }]) => ({
   business_id: "biz",
@@ -27,6 +31,7 @@ function makeTab({ config = baseConfig(), pollerStarted = true } = {}) {
   const sent = [];
   const buys = [];
   const storage = {};
+  const storageListeners = [];
   const chrome = {
     runtime: {
       sendMessage: async (message) => {
@@ -43,6 +48,7 @@ function makeTab({ config = baseConfig(), pollerStarted = true } = {}) {
         },
         set: async (values) => Object.assign(storage, values),
       },
+      onChanged: { addListener: (listener) => storageListeners.push(listener) },
     },
   };
   const window = {
@@ -52,6 +58,10 @@ function makeTab({ config = baseConfig(), pollerStarted = true } = {}) {
     addEventListener: () => void 0,
     dispatchEvent: (event) => {
       const request = JSON.parse(event.detail);
+      if (request.type === "IM_BL_FETCH") {
+        tab.answerList = (rows) => tab.listeners.forEach((listener) => listener({ detail: `${JSON.stringify({ requestId: request.requestId, result: { ok: true, status: 200, retryAfterSeconds: null, durationMs: 5 } })}\n${JSON.stringify({ DisplayList: rows })}` }));
+        return;
+      }
       if (request.type !== "IM_BL_BUY") return;
       buys.push(request.payload);
       const answer = tab.buyAnswer ?? imBuyAnswer();
@@ -61,10 +71,13 @@ function makeTab({ config = baseConfig(), pollerStarted = true } = {}) {
     },
   };
   window.addEventListener = (type, listener) => {
-    if (type === "im-leads-bridge-response") tab.listeners.push(listener);
+    if (type === channels.response) tab.listeners.push(listener);
+    if (type === "message") tab.messageListeners.push(listener);
   };
   const { api } = loadContentScript({ chrome, window, CustomEvent: class { constructor(type, init) { this.type = type; this.detail = init.detail; } } });
-  const tab = { api, sent, buys, storage, config, listeners: [], buyAnswer: null };
+  const tab = { api, sent, buys, storage, config, listeners: [], messageListeners: [], buyAnswer: null, window };
+  // What chrome.storage does when the service worker saves a newer value.
+  tab.storageChanged = (changes) => storageListeners.forEach((listener) => listener(Object.fromEntries(Object.entries(changes).map(([key, newValue]) => [key, { newValue }])), "local"));
   api.setState("storedMarkersLoaded", true);
   api.setState("apiPollerStarted", pollerStarted);
   api.setState("captureState", { authSession: { access_token: "t", default_business: { id: "biz" } }, selectedBusinessId: "biz", botEnabled: true, decisionConfig: config });
@@ -444,4 +457,157 @@ test("the zip users download is the current extension", () => {
     const zipped = execFileSync("unzip", ["-p", "public/hi-san-bot-extension.zip", file], { maxBuffer: 8 * 1024 * 1024 }).toString("utf8");
     assert.equal(zipped === readBundle(file), true, `${file} in the zip differs from extension/. Rebuild the zip.`);
   }
+});
+
+test("channels: the content script and the page script use the same names, and nobody else's", () => {
+  const hook = channelNames("page-network-hook.js");
+  assert.deepEqual(hook, channels);
+  for (const [key, name] of Object.entries(channels)) {
+    assert.ok(name, key);
+    assert.notEqual(name, SHARED_NAMES[key], `${key} is still the name other extensions use`);
+  }
+  for (const file of ["content-script.js", "page-network-hook.js"]) {
+    for (const name of Object.values(SHARED_NAMES)) assert.equal(readBundle(file).includes(name), false, `${file} still uses ${name}`);
+  }
+});
+
+test("channels: the page script runs our purchase once and ignores another extension's request", async () => {
+  const hook = loadPageHook();
+  hook.request(SHARED_NAMES.request, "IM_BL_BUY", { ofrid: "501", ofrtitle: "x" });
+  hook.request(SHARED_NAMES.request, "IM_BL_FETCH");
+  await settle();
+  assert.equal(hook.sent.length, 0, "a request from another extension must not reach IndiaMART through us");
+
+  hook.request(channels.request, "IM_BL_BUY", { ofrid: "502", ofrtitle: "x" });
+  await settle();
+  assert.equal(hook.sent.length, 1);
+  assert.match(hook.sent[0].url, /contactBuyNow$/);
+  assert.equal(hook.sent[0].body.ofrid, "502");
+  assert.equal(hook.sent[0].body.glusrId, "123456");
+});
+
+test("channels: the content script ignores lead lists posted by another extension's page script", async () => {
+  const tab = makeTab();
+  tab.api.startPageDataListener();
+  const post = (source) => tab.messageListeners.forEach((listener) => listener({ source: tab.window, data: { source, type: "IM_BL_DISPLAY_DATA", status: 200, payload: { DisplayList: [imRow({ ETO_OFR_ID: source === channels.pageData ? "70021" : "70020" })] } } }));
+  post(SHARED_NAMES.pageData);
+  await settle();
+  assert.equal(tab.recorded().length, 0);
+  post(channels.pageData);
+  await settle();
+  assert.deepEqual(tab.recorded().map((lead) => lead.client_event_id), ["im-ofr:70021"]);
+});
+
+// The matching rule exactly as it was before the speed-up: one pattern per word, built up front.
+function referenceMatcher(keyword, matchType, stemmed, negative) {
+  const normalize = (value) => (value ?? "").toLowerCase().split(/\s+/u).filter(Boolean).join(" ");
+  const WORD = "[\\p{L}\\p{N}_]";
+  const SUFFIX = "(?:ings|ing|ers|er|als|al|ed|es|s)?";
+  const STOP = new Set(["and", "are", "but", "for", "from", "has", "have", "into", "its", "not", "our", "the", "this", "that", "was", "with", "you"]);
+  const pattern = (word, suffix = "") => new RegExp(`(?<!${WORD})${word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}${suffix}(?!${WORD})`, "u");
+  const normalized = normalize(keyword);
+  if (!normalized) return null;
+  if (matchType === "contains") {
+    if (negative) return (text) => text.includes(normalized);
+    const kept = normalized.split(" ").filter((word) => word.length >= 3 && !STOP.has(word));
+    const words = (kept.length ? [...new Set(kept)] : [normalized]).map((word) => pattern(word));
+    return (text) => words.some((one) => one.test(text));
+  }
+  if (matchType === "all_words") {
+    const words = normalized.split(" ").map((word) => pattern(word, stemmed ? SUFFIX : ""));
+    return (text) => words.every((one) => one.test(text));
+  }
+  const whole = pattern(normalized, stemmed ? SUFFIX : "");
+  return (text) => whole.test(text);
+}
+
+test("speed: the faster keyword check gives exactly the same answer as before, for every match type", () => {
+  const { api } = loadContentScript();
+  const pieces = ["tadalafil", "tadalafil20", "tablets", "tablet", "20", "mg", "20mg", "minoxidil+finast", "minoxidil", "acid", "tranexamic", "the", "for", "é", "crème", "दवा", "c++", "a.b", "(usp)", "test", "testosterone", "testing", "tested", "e", "x_y", "250", "ip", "oil-free", "50%", "𝒳"];
+  let seed = 7;
+  const random = (n) => (seed = (seed * 1103515245 + 12345) % 2147483648) % n;
+  const phrase = (max) => Array.from({ length: 1 + random(max) }, () => pieces[random(pieces.length)]).join(random(5) ? " " : "+");
+  const normalize = (value) => value.toLowerCase().split(/\s+/u).filter(Boolean).join(" ");
+  let compared = 0;
+  let matched = 0;
+  for (let round = 0; round < 6000; round += 1) {
+    const keyword = phrase(3);
+    const title = normalize(phrase(7));
+    const matchType = ["contains", "whole_word", "all_words", "exact"][random(4)];
+    const stemmed = random(2) === 1;
+    const negative = random(2) === 1;
+    const expected = referenceMatcher(keyword, matchType, stemmed, negative)(title);
+    const actual = api.keywordMatcher(keyword, matchType, stemmed, negative)(title);
+    assert.equal(actual, expected, JSON.stringify({ keyword, title, matchType, stemmed, negative }));
+    compared += 1;
+    matched += expected ? 1 : 0;
+  }
+  assert.ok(matched > 500 && matched < compared - 500, `the sample must cover both outcomes: ${matched} of ${compared} matched`);
+  assert.equal(api.keywordMatcher("   ", "contains"), null);
+});
+
+test("speed: a decision builds patterns only for keywords that appear in the title", () => {
+  let built = 0;
+  class CountingRegExp extends RegExp {
+    constructor(...args) {
+      super(...args);
+      built += 1;
+    }
+  }
+  const { api } = loadContentScript({ RegExp: CountingRegExp });
+  const rules = Array.from({ length: 300 }, (_, index) => ({ id: `r${index}`, type: "positive", keyword: index === 0 ? "tadalafil" : `keyword${index} extra${index}`, match_type: "contains" }));
+  const config = baseConfig({}, rules);
+  const lead = plain(api.apiLeadToCapturedLead(api.parseBlApiRow(imRow({ ETO_OFR_TITLE: "Vidalista 20 Mg Tadalafil Tablets" })), "https://x"));
+  const decision = api.decideLeadLocally(lead, config, { captured: 0, keyword: {} });
+  assert.equal(decision.decision, "captured");
+  assert.deepEqual(plain(decision.matched_positive_rule_ids), ["r0"]);
+  assert.ok(built <= 5, `${built} patterns were built for one lead; before this fix it was one per keyword word (about 600 here)`);
+});
+
+test("rules: an open tab uses changed keywords as soon as the server's version changes", async () => {
+  const before = baseConfig({}, [{ id: "r1", type: "positive", keyword: "tadalafil", match_type: "contains" }]);
+  const tab = makeTab({ config: before });
+  tab.api.startCaptureStateSync();
+  const sildenafil = () => tab.parse(imRow({ ETO_OFR_ID: String(71000 + tab.recorded().length), ETO_OFR_TITLE: "Sildenafil Tablets" }));
+  const lastDecision = () => tab.recorded().at(-1).local_decision;
+  const current = () => tab.api.getState("captureState").decisionConfig;
+  const withNewRule = (version) => ({ ...before, version, keyword_rules: [...before.keyword_rules, { id: "r2", type: "positive", keyword: "sildenafil", match_type: "contains" }] });
+
+  tab.storageChanged({ decisionConfig: withNewRule(before.version) });
+  tab.api.decidePolledLeads([sildenafil()], "biz", current(), "poll");
+  await settle();
+  assert.equal(lastDecision().skip_reason, "no_positive_keyword_match", "same version: the tab keeps the rules it compiled, which is why the server must change the version");
+
+  tab.storageChanged({ decisionConfig: withNewRule(before.version + 1) });
+  tab.api.decidePolledLeads([sildenafil()], "biz", current(), "poll");
+  await settle();
+  assert.equal(lastDecision().decision, "captured");
+
+  tab.storageChanged({ decisionConfig: { ...before, version: before.version + 2 } });
+  tab.api.decidePolledLeads([sildenafil()], "biz", current(), "poll");
+  await settle();
+  assert.equal(lastDecision().skip_reason, "no_positive_keyword_match", "a deleted keyword stops buying at once");
+});
+
+test("timing: the note says whether the delay was deciding or waiting for a purchase slot", () => {
+  const { api } = loadContentScript();
+  const base = { postedAtMs: 1000, receivedAt: 2400, sentAt: 2520, answeredAt: 2570 };
+  assert.equal(api.buyTimingNote({ ...base, queuedAt: 2500, startedAt: 2500 }), "posted 1.4 s before we saw it \u00b7 buy sent 120 ms after (100 ms deciding) \u00b7 IndiaMART answered in 50 ms");
+  assert.equal(api.buyTimingNote({ ...base, queuedAt: 2402, startedAt: 2518 }), "posted 1.4 s before we saw it \u00b7 buy sent 120 ms after (116 ms waiting for a buy slot) \u00b7 IndiaMART answered in 50 ms");
+  assert.equal(api.buyTimingNote({ ...base, sentAt: 2403, queuedAt: 2401, startedAt: 2402, answeredAt: 2453 }), "posted 1.4 s before we saw it \u00b7 buy sent 3 ms after \u00b7 IndiaMART answered in 50 ms");
+});
+
+test("rules: a poll that was waiting decides with the keywords as they are when the list arrives", async () => {
+  const before = baseConfig({}, [{ id: "r1", type: "positive", keyword: "tadalafil", match_type: "contains" }]);
+  const tab = makeTab({ config: before });
+  tab.api.startCaptureStateSync();
+  const poll = tab.api.runApiPoll();
+  // The fake page shortens every timer to 5 ms, so answer as soon as the request is out.
+  for (let turn = 0; turn < 50 && !tab.answerList; turn += 1) await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(typeof tab.answerList, "function", "the list request is in flight");
+  tab.storageChanged({ decisionConfig: { ...before, version: before.version + 1, keyword_rules: [...before.keyword_rules, { id: "r2", type: "positive", keyword: "sildenafil", match_type: "contains" }] } });
+  tab.answerList([imRow({ ETO_OFR_ID: "72001", ETO_OFR_TITLE: "Sildenafil Tablets" })]);
+  const delay = await poll;
+  await settle();
+  assert.equal(tab.recorded()[0]?.local_decision.decision, "captured", JSON.stringify({ delay, poll: tab.storage.lastApiPoll, sent: tab.sent.map((m) => m.type) }));
 });

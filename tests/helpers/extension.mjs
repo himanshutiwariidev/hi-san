@@ -4,6 +4,8 @@ import path from "node:path";
 import vm from "node:vm";
 
 const ROOT = path.resolve(import.meta.dirname, "..", "..");
+// HISAN_EXTENSION_DIR points the tests at another build of the extension, such as an older one.
+export const EXTENSION_DIR = process.env.HISAN_EXTENSION_DIR ?? path.join(ROOT, "extension");
 
 const EXPORTS = [
   "parseBlApiRow", "parseBlDisplayData", "parseBlClosedLeads", "parseBuyResult", "enrichmentFromBuy", "enrichmentHasBuyerData",
@@ -11,12 +13,13 @@ const EXPORTS = [
   "isPollRateLimited", "nextSafetyBrake", "resetRealtimeThrottle", "startRealtimeLeadListener", "decidePolledLeads",
   "decideArrivedLeads", "shouldAutoEnrichMarker", "canBuyInThisTab", "alreadyDecided", "sweepDeferredLeads", "rememberMarkers",
   "recordEnrichmentAttempt", "restoreDecidedLeadKeys", "isBuyLeadPath", "parseRealtimeLeadMessage",
+  "keywordMatcher", "buyTimingNote", "startCaptureStateSync", "startPageDataListener", "runApiPoll",
 ];
 
 // Runs content-script.js in a fresh VM. The bundle only boots itself when window and chrome exist,
 // so the test decides what those globals look like after the code has loaded.
 export function loadContentScript(globals = {}) {
-  const source = fs.readFileSync(path.join(ROOT, "extension/content-script.js"), "utf8");
+  const source = fs.readFileSync(path.join(EXTENSION_DIR, "content-script.js"), "utf8");
   const exportsBlock = EXPORTS.map((name) => `if (typeof ${name} !== "undefined") globalThis.__t.${name} = ${name};`).join("\n");
   // Direct eval reaches the bundle's private variables, which is how a test sets up tab state.
   const stateAccess = "globalThis.__t.setState = (name, value) => eval(`${name} = value`); globalThis.__t.getState = (name) => eval(name);";
@@ -30,7 +33,45 @@ export function loadContentScript(globals = {}) {
 export const plain = (value) => JSON.parse(JSON.stringify(value));
 
 export function readBundle(file) {
-  return fs.readFileSync(path.join(ROOT, "extension", file), "utf8");
+  return fs.readFileSync(path.join(EXTENSION_DIR, file), "utf8");
+}
+
+// The names the content script and the page script talk to each other on, read from a shipped file.
+export function channelNames(file = "content-script.js") {
+  const source = readBundle(file);
+  const value = (name) => new RegExp(`var ${name} = "([^"]+)";`).exec(source)?.[1];
+  return { request: value("BRIDGE_REQUEST_EVENT"), response: value("BRIDGE_RESPONSE_EVENT"), pageData: value("BL_DISPLAY_DATA_SOURCE") };
+}
+
+// Runs page-network-hook.js on a fake page. Returns the requests it sent and a way to raise page events.
+export function loadPageHook({ glid = "123456" } = {}) {
+  const sent = [];
+  const listeners = new Map();
+  const fetch = async (url, options = {}) => {
+    sent.push({ url: String(url), body: options.body ? JSON.parse(options.body) : null });
+    return { ok: true, status: 200, headers: { get: () => null }, text: async () => "{}", clone() { return this; } };
+  };
+  const window = {
+    fetch,
+    glid,
+    location: { origin: "https://seller.indiamart.com" },
+    setTimeout,
+    clearTimeout,
+    postMessage: () => void 0,
+    addEventListener: (type, listener) => listeners.set(type, [...(listeners.get(type) ?? []), listener]),
+    dispatchEvent: (event) => (listeners.get(event.type) ?? []).forEach((listener) => listener(event)),
+  };
+  class CustomEvent {
+    constructor(type, init = {}) {
+      this.type = type;
+      this.detail = init.detail;
+    }
+  }
+  const context = vm.createContext({ console, URL, window, document: { cookie: "" }, CustomEvent, AbortController, setTimeout, clearTimeout });
+  vm.runInContext(readBundle("page-network-hook.js"), context, { filename: "page-network-hook.js" });
+  const request = (eventName, type, payload = {}) =>
+    window.dispatchEvent(new CustomEvent(eventName, { detail: JSON.stringify({ type, requestId: `${type}-${Math.random().toString(36).slice(2)}`, payload }) }));
+  return { sent, request, window };
 }
 
 // A row in the shape IndiaMART's getBLDisplayData returns, using the keys parseBlApiRow reads. All values are fake.

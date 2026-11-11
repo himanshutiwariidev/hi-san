@@ -24,6 +24,10 @@ Data is stored in SQLite at `data/hisan-bot.db`. Set `DATABASE_PATH` to put it e
 
 Extract the new version over the same folder and press **Reload** on `chrome://extensions`. Do not remove it or load another folder: an unpacked extension's storage is tied to its folder, and purchases waiting to sync live there. Deploy the server before updating the extension.
 
+## One bot per IndiaMART login
+
+Do not run another lead-buying extension on the same IndiaMART login while this one runs. Both see the same lead and both try to buy it, so one always records a failed purchase. To compare two bots, run them at different times, then paste `tools/compare-bots.js` into each one's service worker console.
+
 ## Test
 
 ```bash

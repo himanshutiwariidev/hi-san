@@ -146,6 +146,9 @@ export default function ExtensionPage() {
             </Step>
             <Step n={3} title="Open IndiaMART BuyLeads">
               Log in to your IndiaMART seller account and open <strong>BuyLeads</strong> (seller.indiamart.com/bltxn). Keep this tab open.
+              <span className="mt-2 block">
+                <strong>One bot per IndiaMART login.</strong> Switch off any other lead-buying extension in <code className="rounded bg-surface-muted px-1">chrome://extensions</code> while this one runs. Two bots both try to buy the same lead, so one of them always shows a failed purchase.
+              </span>
             </Step>
             <Step n={4} title="Test with Dry run first">
               Turn on <strong>Auto-buy running</strong> with <strong>Dry run</strong> on. The popup lists every lead it read and whether it would buy it. Nothing is spent.

@@ -22,7 +22,9 @@ export async function startFakeIndiaMart(port) {
   const cert = path.join(dir, "cert.pem");
   execFileSync("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", key, "-out", cert, "-days", "1", "-subj", "/CN=seller.indiamart.com"], { stdio: "ignore" });
 
-  const state = { rows: [], listStatus: 200, lostIds: new Set(), lists: [], buys: [] };
+  // buyDelayMs: how long a successful purchase takes to answer. duplicateBuy: what a second purchase of the same
+  // lead by this account gets ("success" repeats the answer, "consumed" is refused at once, as a sold-out lead is).
+  const state = { rows: [], listStatus: 200, lostIds: new Set(), lists: [], buys: [], bought: new Set(), buyDelayMs: 0, duplicateBuy: "success" };
   const server = https.createServer({ key: fs.readFileSync(key), cert: fs.readFileSync(cert) }, (request, response) => {
     let body = "";
     request.on("data", (chunk) => (body += chunk));
@@ -42,11 +44,14 @@ export async function startFakeIndiaMart(port) {
       }
       if (url.pathname === "/blreact/contactBuyNow") {
         const { ofrid } = JSON.parse(body || "{}");
-        state.buys.push({ at: Date.now(), ofrid: String(ofrid) });
-        if (state.lostIds.has(String(ofrid))) {
+        const duplicate = state.bought.has(String(ofrid));
+        const refused = state.lostIds.has(String(ofrid)) || (duplicate && state.duplicateBuy === "consumed");
+        state.buys.push({ at: Date.now(), ofrid: String(ofrid), answer: refused ? "refused" : "bought" });
+        if (refused) {
           return send(200, { Flag: "7", MESSAGE: "Sorry, this Buylead expired just a minute ago. This BuyLead is already consumed by maximum permissible sellers." });
         }
-        return send(200, {
+        state.bought.add(String(ofrid));
+        return setTimeout(send, state.buyDelayMs, 200, {
           Status: "Success",
           Flag: "1",
           pur_id: `P${ofrid}`,
