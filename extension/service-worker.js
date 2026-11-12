@@ -7318,6 +7318,15 @@ async function sendLeadRecords(clientEventIds) {
   }
   await Promise.all(batches.map((batch) => runIngest(() => sendLeadBatch(batch))));
 }
+// Measurement only: how long ago the tab first saw this lead. The server takes it off its own clock, so the
+// PC's clock, which is often a second or more off, does not matter.
+function withSendDelay(event, now = Date.now()) {
+  const seenAt = event?.seen?.at_ms;
+  if (typeof seenAt !== "number" || !Number.isFinite(seenAt)) {
+    return event;
+  }
+  return { ...event, seen: { ...event.seen, sent_after_ms: Math.max(0, now - seenAt) } };
+}
 async function sendLeadBatch(clientEventIds) {
   const state = await chrome.storage.local.get(["authSession", "selectedBusinessId", "billingEntitlement", "businesses"]);
   if (!billingAllows(state) && !await refreshBillingAccess()) {
@@ -7342,7 +7351,7 @@ async function sendLeadBatch(clientEventIds) {
         authorization: `Bearer ${authSession.access_token}`,
         "content-type": "application/json"
       },
-      body: JSON.stringify({ leads: claimed.map((record) => record.event) })
+      body: JSON.stringify({ leads: claimed.map((record) => withSendDelay(record.event)) })
     });
     if (response.status === 422 && claimed.length > 1) {
       await Promise.all(claimed.map((record) => transitionEvent(outboxDb, record.client_event_id, "RETRY", "Sending again on its own")));

@@ -125,6 +125,8 @@ function prepareLookAlike(dir) {
 }
 
 const row = (id, overrides = {}) => imRow({ ETO_OFR_ID: String(id), ...overrides });
+// IndiaMART's own stamp for "posted": Indian time, whole seconds.
+const istStamp = (ms) => new Date(ms + 330 * 60000).toISOString().replace(/[-T:]/g, "").slice(0, 14);
 const unknownSignals = { ETO_OFR_BUYER_IS_MOB_VERF: undefined, ETO_OFR_EMAIL_VERIFIED: undefined, BY_LEAD_TYPE: undefined, ETO_OFR_ADDITIONAL_DETAILS: undefined };
 
 const work = fs.mkdtempSync(path.join(os.tmpdir(), "hisan-e2e-"));
@@ -270,7 +272,7 @@ try {
   const swept = await until(reached(1009, "filtered"), 40000, "lead 1009");
   check("a pushed lead that never reaches the list is still recorded", swept?.reason?.label === "Contact Mismatch", swept?.reason?.label);
 
-  const pushedBuy = row(1010);
+  const pushedBuy = row(1010, { OFR_DATE: istStamp(Date.now()) });
   const xmppBuy = `<message from="a@b/realtime_bl"><body>${JSON.stringify(JSON.stringify(pushedBuy)).replace(/&/g, "&amp;").replace(/</g, "&lt;")}</body></message>`;
   const sentAt = Date.now();
   await page.evaluate(`new BroadcastChannel("WebSocketChannel").postMessage(${JSON.stringify(xmppBuy)})`);
@@ -278,12 +280,24 @@ try {
   const buyAt = im.state.buys.find((buy) => buy.ofrid === "1010")?.at;
   check("a pushed lead is bought straight away", Boolean(realtime) && buyAt - sentAt < 1000, `${buyAt - sentAt} ms`);
 
+  // Measurement: the pushed lead was "posted" this very second, so the server must place its sighting within a
+  // couple of seconds of that, by push, with the purchase's own numbers.
+  const version = JSON.parse(fs.readFileSync(path.join(EXTENSION_DIR, "manifest.json"), "utf8")).version;
+  const pushTiming = realtime?.timing;
+  check("timing: a pushed lead is recorded as seen by push, moments after it was posted", pushTiming?.seen_via === "push" && pushTiming.exact === true && pushTiming.posted_to_seen_ms > -500 && pushTiming.posted_to_seen_ms < 3000 && pushTiming.extension === version, `${pushTiming?.posted_to_seen_ms} ms after posting, v${pushTiming?.extension}`);
+  check("timing: a won purchase keeps how fast the request went", pushTiming?.buy?.retry === false && pushTiming.buy.seen_to_sent_ms >= 0 && pushTiming.buy.seen_to_sent_ms < 1000 && pushTiming.buy.answer_ms >= 0 && pushTiming.buy.answer_ms < 5000, JSON.stringify(pushTiming?.buy));
+  const listTiming = (await leadFor(1007))?.timing;
+  check("timing: a lead found in the list is recorded as seen by the list", ["poll", "page"].includes(listTiming?.seen_via) && listTiming.exact === true, listTiming?.seen_via);
+  const lostTiming = (await leadFor(1002))?.timing;
+  check("timing: a lost purchase has its numbers too", lostTiming?.buy?.answer_ms >= 0 && lostTiming.exact === true, JSON.stringify(lostTiming?.buy));
+
   // A keyword added on the dashboard while the IndiaMART tab stays open.
   await server.call("POST", `/businesses/${business}/keyword-rules`, { keyword: "sildenafil", match: "contains" });
   const synced = await until(() => sw.evaluate(`chrome.storage.local.get("decisionConfig").then((state) => state.decisionConfig?.keyword_rules?.length === 2)`), 45000, "the new keyword reaching the extension");
   im.state.rows.push(row(1012, { ETO_OFR_TITLE: "Sildenafil Tablets" }));
   const newKeyword = synced ? await until(reached(1012, "retrieved"), 20000, "lead 1012") : null;
   check("a keyword added on the dashboard works without reloading the IndiaMART tab", Boolean(newKeyword), newKeyword?.matched_keyword ?? (await leadFor(1012))?.reason?.label ?? "");
+  check("timing: a polled lead knows how long before it the list was last read", newKeyword?.timing?.seen_via === "poll" && newKeyword.timing.since_poll_ms > 3000 && newKeyword.timing.since_poll_ms < 30000, `${newKeyword?.timing?.since_poll_ms} ms`);
 
   const counts = {};
   for (const buy of im.state.buys) counts[buy.ofrid] = (counts[buy.ofrid] ?? 0) + 1;

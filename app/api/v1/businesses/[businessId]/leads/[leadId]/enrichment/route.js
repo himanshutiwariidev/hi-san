@@ -3,6 +3,7 @@ import { requireBusiness, requireUser } from "@/lib/server/auth";
 import { notFound, readJson, route } from "@/lib/server/http";
 import { leadOut } from "@/lib/server/serializers";
 import { dispatchLeadEvent } from "@/lib/server/webhooks";
+import { withBuyTiming } from "@/lib/leadTiming";
 
 export const PATCH = route(async (request, { businessId, leadId }) => {
   const user = await requireUser();
@@ -56,6 +57,7 @@ export const PATCH = route(async (request, { businessId, leadId }) => {
       decision = 'captured',
       filter_reason = NULL,
       reason_detail = NULL,
+      timing = COALESCE(?, timing),
       retrieved_at = COALESCE(retrieved_at, ?)
      WHERE id = ?`
   ).run(
@@ -72,6 +74,7 @@ export const PATCH = route(async (request, { businessId, leadId }) => {
     body.has_whatsapp ? 1 : 0,
     email,
     phone,
+    withBuyTiming(lead.timing, body.buy_timing),
     now(),
     lead.id
   );

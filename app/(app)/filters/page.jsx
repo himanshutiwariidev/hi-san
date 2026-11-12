@@ -90,8 +90,15 @@ function SettingsForm({ business }) {
       </label>
 
       <div className="grid grid-cols-3 gap-4 max-[760px]:grid-cols-1">
-        <LabeledField label="Daily purchase limit (0 = unlimited)">
-          <input type="number" min={0} value={settings.daily_limit ?? 10} onChange={(e) => update({ daily_limit: Number(e.target.value) })} className={inputClass} />
+        <LabeledField label={`Daily purchase limit (1–${settings.max_daily_capture_limit ?? 50})`}>
+          <input
+            type="number"
+            min={1}
+            max={settings.max_daily_capture_limit ?? 50}
+            value={settings.daily_capture_limit ?? settings.daily_limit ?? 10}
+            onChange={(e) => update({ daily_limit: Number(e.target.value), daily_capture_limit: Number(e.target.value) })}
+            className={inputClass}
+          />
         </LabeledField>
         <LabeledField label="Minimum global quantity (0 = any)">
           <input type="number" min={0} step="any" value={settings.min_quantity ?? 0} onChange={(e) => update({ min_quantity: Number(e.target.value) })} className={inputClass} />
@@ -420,7 +427,7 @@ export default function FiltersPage() {
     <div className="grid gap-[22px]">
       <PageHeader
         title="Keywords"
-        description={`Positive and negative keyword rules with quantity thresholds and daily lead limits. No business or keyword captures more than ${business.daily_limit ?? 11} leads a day.`}
+        description="Positive and negative keyword rules with quantity thresholds and daily lead limits."
       />
       <Card className="grid gap-4">
         <div>

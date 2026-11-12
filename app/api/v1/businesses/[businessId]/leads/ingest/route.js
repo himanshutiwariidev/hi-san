@@ -3,6 +3,7 @@ import { requireBusiness, requireUser } from "@/lib/server/auth";
 import { badRequest, readJson, route } from "@/lib/server/http";
 import { dispatchLeadEvent } from "@/lib/server/webhooks";
 import { describeLeadReason } from "@/lib/leadReasons";
+import { postedAtFromOfferDate, seenFromEvent } from "@/lib/leadTiming";
 
 const keywordOfRule = (businessId, ruleId) =>
   ruleId ? (db.prepare("SELECT keyword FROM keyword_rules WHERE id = ? AND business_id = ?").get(String(ruleId), businessId)?.keyword ?? null) : null;
@@ -71,14 +72,18 @@ export const POST = route(async (request, { businessId }) => {
       const id = newId("lead");
       const ts = now();
       const raw = JSON.stringify(item.raw_fields ?? item).slice(0, 10000);
+      // Measurement only: when IndiaMART posted the lead, and when and how the bot first saw it.
+      const seen = seenFromEvent(item.seen, ts);
+      const postedAt = postedAtFromOfferDate(item.raw_fields?.indiamart_api?.offer_date);
 
       db.prepare(
         `INSERT INTO leads (
           id, business_id, external_id, client_event_id, title, category, quantity, unit,
           country_code, country_name, city, state, address,
           email_verified, phone_verified, gst_verified, has_whatsapp, has_email, has_phone, buyer_member_months, is_retail,
-          status, decision, filter_reason, reason_detail, matched_keyword, matched_rule_ids, source_url, raw, received_at, decided_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          status, decision, filter_reason, reason_detail, matched_keyword, matched_rule_ids, source_url, raw, received_at, decided_at,
+          posted_at, seen_at, seen_via, timing
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       ).run(
         id,
         business.id,
@@ -110,7 +115,11 @@ export const POST = route(async (request, { businessId }) => {
         item.source_url ? String(item.source_url).slice(0, 500) : null,
         raw,
         ts,
-        ts
+        ts,
+        postedAt,
+        seen.seen_at,
+        seen.seen_via,
+        Object.keys(seen.extra).length ? JSON.stringify(seen.extra) : null
       );
 
       db.prepare("INSERT INTO lead_logs (lead_id, at, message) VALUES (?, ?, ?)").run(

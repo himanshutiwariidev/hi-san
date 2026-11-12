@@ -518,6 +518,11 @@
     if (!config || config.today.utc_date !== utcDateString(now)) {
       return null;
     }
+    // The server says how long its counts for today stay valid (the limit's day ends at midnight Indian time).
+    // Past that, wait for fresh counts instead of deciding with yesterday's.
+    if (typeof config.today.resets_in_ms === "number" && typeof config.requested_at === "number" && now >= config.requested_at + config.today.resets_in_ms) {
+      return null;
+    }
     const classification = classifyLeadLocally(lead, config);
     const result = { ...classification, config_version: config.version };
     if (classification.decision !== "captured") {
@@ -1916,11 +1921,16 @@
     }
     const sentAt = Date.now();
     const outcome = parseBuyResult(await bridgeRequest("IM_BL_BUY", buildBuyPayload(api, "", position)));
-    const timing = buyTimingNote({ postedAtMs: api.posted_at_ms, receivedAt, firstSeenAt, queuedAt, startedAt, sentAt, answeredAt: Date.now() });
+    const answeredAt = Date.now();
+    const timing = buyTimingNote({ postedAtMs: api.posted_at_ms, receivedAt, firstSeenAt, queuedAt, startedAt, sentAt, answeredAt });
+    const boughtEnrichment = () => ({
+      ...enrichmentFromBuy(api, outcome, window.location.href),
+      buy_timing: buyTimingNumbers(api, receivedAt, queuedAt, startedAt, sentAt, answeredAt)
+    });
     recordBuyTiming(api, outcome, receivedAt, startedAt, sentAt, firstSeenAt, queuedAt);
     if (!await stored) {
       if (outcome.kind === "bought") {
-        const enrichment = enrichmentFromBuy(api, outcome, window.location.href);
+        const enrichment = boughtEnrichment();
         if (enrichmentHasBuyerData(enrichment)) {
           parkedEnrichments.set(marker.client_event_id, enrichment);
         }
@@ -1936,7 +1946,7 @@
           at: (/* @__PURE__ */ new Date()).toISOString()
         }
       }).catch(() => void 0);
-      const enrichment = enrichmentFromBuy(api, outcome, window.location.href);
+      const enrichment = boughtEnrichment();
       if (!enrichmentHasBuyerData(enrichment)) {
         await recordEnrichmentAttempt(marker, `contact_details_not_retrieved:${outcome.raw}`, Number.POSITIVE_INFINITY, true);
       } else if (!await sendLeadEnrichment(marker, enrichment)) {
@@ -2359,11 +2369,58 @@
     const config = cachedDecisionConfig(state, businessId);
     return config ? { businessId, config } : { idle: "filter_config_not_loaded" };
   }
+  // Measurement only: nothing below changes what is bought or when. The first time and way each lead reached
+  // this tab is kept apart from when it was decided, because a lead can arrive by push and be decided seconds
+  // later by a poll.
+  var firstSightings = /* @__PURE__ */ new Map();
+  var lastPollListAt = 0;
+  var extensionVersionText;
+  function extensionVersion() {
+    if (extensionVersionText === void 0) {
+      try {
+        extensionVersionText = chrome.runtime.getManifest().version;
+      } catch {
+        extensionVersionText = null;
+      }
+    }
+    return extensionVersionText;
+  }
+  function noteSightings(leads, via, at) {
+    for (const api of leads) {
+      if (!firstSightings.has(api.ofr_id)) {
+        firstSightings.set(api.ofr_id, { via, at, since_poll_ms: lastPollListAt ? at - lastPollListAt : null });
+      }
+    }
+    while (firstSightings.size > MAX_DECIDED_LEAD_KEYS) {
+      firstSightings.delete(firstSightings.keys().next().value);
+    }
+  }
+  function sightingOf(api, via, at, now = Date.now()) {
+    const first = firstSightings.get(api.ofr_id) ?? { via, at, since_poll_ms: null };
+    return {
+      via: first.via,
+      at_ms: first.at,
+      since_poll_ms: first.since_poll_ms,
+      decided_after_ms: Math.max(0, now - first.at),
+      ext: extensionVersion()
+    };
+  }
+  function buyTimingNumbers(api, receivedAt, queuedAt, startedAt, sentAt, answeredAt) {
+    const firstSeenAt = firstSightings.get(api.ofr_id)?.at ?? receivedAt;
+    return {
+      seen_to_sent_ms: firstSeenAt === void 0 ? null : Math.max(0, sentAt - firstSeenAt),
+      decide_ms: receivedAt === void 0 || queuedAt === void 0 ? null : Math.max(0, queuedAt - receivedAt),
+      slot_wait_ms: queuedAt === void 0 ? null : Math.max(0, startedAt - queuedAt),
+      answer_ms: Math.max(0, answeredAt - sentAt),
+      retry: receivedAt === void 0
+    };
+  }
   async function decideArrivedLeads(leads, source) {
     if (!leads.length) {
       return;
     }
     const receivedAt = Date.now();
+    noteSightings(leads, source, receivedAt);
     apiLeadIndex.add(source === "push" ? leads.filter((api) => !apiLeadIndex.get(api.ofr_id)) : leads);
     if (!storedMarkersLoaded) {
       storedMarkersLoad ??= loadStoredLeadDecisions().catch(() => void 0);
@@ -2530,6 +2587,8 @@
       return POLL_NOT_OK_DELAY_MS;
     }
     apiPollHttpErrors = 0;
+    noteSightings(leads, "poll", receivedAt);
+    lastPollListAt = receivedAt;
     apiLeadIndex.add(leads);
     // The request can wait several seconds for a slot. Decide with the rules as they are now, not as they were when it was sent.
     const latest = captureContextFrom(captureState ?? await readCaptureState());
@@ -2539,7 +2598,7 @@
     ({ businessId, config } = latest);
     const { recorded } = decidePolledLeads(leads, businessId, config, "poll", receivedAt);
     sweepDeferredLeads(businessId, config);
-    void trackClosedLeads(result.json, receivedAt).catch(() => void 0);
+    void trackClosedLeads(result.json, receivedAt, "poll").catch(() => void 0);
     await recordPollStatus({
       ok: true,
       status: result.status,
@@ -2592,11 +2651,12 @@
   }
   // Kept out of the decided list on purpose: a lead that reopens must still be judged normally.
   var closedLeadIds = /* @__PURE__ */ new Set();
-  async function trackClosedLeads(payload, receivedAt = Date.now()) {
+  async function trackClosedLeads(payload, receivedAt = Date.now(), via = "page") {
     const closed = parseBlClosedLeads(payload);
     if (!closed.length) {
       return 0;
     }
+    noteSightings(closed, via, receivedAt);
     storedMarkersLoad ??= loadStoredLeadDecisions().catch(() => void 0);
     await storedMarkersLoad;
     const context = captureContextFrom(captureState ?? await readCaptureState());
@@ -2615,6 +2675,7 @@
       }
       recorded.push({
         ...apiLeadToCapturedLead(api, window.location.href, now),
+        seen: sightingOf(api, via, receivedAt, now),
         local_decision: {
           decision: "skipped",
           skip_reason: "lead_not_open",
@@ -2689,7 +2750,7 @@
           startBuy(marker, api, positions.get(api.ofr_id) ?? 1, "fresh", stored, receivedAt, firstSeenAt);
         }
       }
-      recorded.push({ ...lead, local_decision: decision });
+      recorded.push({ ...lead, seen: sightingOf(api, source, receivedAt, now), local_decision: decision });
     }
     sendLateContactSignals(leads, now);
     if (undecided) {

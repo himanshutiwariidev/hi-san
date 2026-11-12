@@ -7,7 +7,8 @@ import LeadStatus from "@/components/leads/LeadStatus";
 import { ContactPills } from "@/components/leads/Contacts";
 import { useApp } from "@/components/AppContext";
 import { apiClient } from "@/lib/api";
-import { formatDateTime } from "@/lib/format";
+import { formatDateTime, formatDateTimeSeconds } from "@/lib/format";
+import { describeBuy, describeSeen } from "@/lib/leadTiming";
 import { useResource } from "@/lib/useResource";
 
 function DetailPanel({ title, rows, children }) {
@@ -49,7 +50,9 @@ export default function LeadModal({ lead, onClose }) {
             ["Product", lead.title],
             ["Quantity", lead.quantity],
             ["Keyword", lead.matched_keyword],
-            ["Posted", lead.posted_text],
+            ["Posted", lead.posted_text ?? (lead.timing?.posted_at ? formatDateTimeSeconds(lead.timing.posted_at) : null)],
+            ["Seen", describeSeen(lead.timing)],
+            ...(describeBuy(lead.timing) ? [["Purchase request", describeBuy(lead.timing)]] : []),
             ["Lead ID", lead.external_id],
             ...(lead.source_url
               ? [["Source", <a key="s" href={lead.source_url} target="_blank" rel="noreferrer" className="text-accent-dark hover:underline">IndiaMART BuyLeads</a>]]

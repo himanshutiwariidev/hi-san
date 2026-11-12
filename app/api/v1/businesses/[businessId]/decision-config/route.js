@@ -2,7 +2,8 @@ import { createHash } from "node:crypto";
 import { db } from "@/lib/server/db";
 import { requireBusiness, requireUser } from "@/lib/server/auth";
 import { route } from "@/lib/server/http";
-import { parseFilterSettings } from "@/lib/server/serializers";
+import { MAX_DAILY_CAPTURE_LIMIT, parseFilterSettings } from "@/lib/server/serializers";
+import { businessDate, businessDayStartIso, msUntilNextBusinessDay } from "@/lib/businessDay";
 
 // An open IndiaMART tab keeps the keyword rules it loaded until this number changes. It was always 1, so a
 // keyword that was added, edited, switched off or deleted reached the tab only after the page was reloaded.
@@ -17,13 +18,16 @@ export const GET = route(async (_request, { businessId }) => {
   const business = requireBusiness(user, businessId);
   const settings = parseFilterSettings(business.filter_settings);
 
-  const utcToday = new Date().toISOString().slice(0, 10);
-  const startOfUtcDay = `${utcToday}T00:00:00.000Z`;
+  // The limit's day starts at midnight Indian time. utc_date stays the UTC date on purpose: the extension only
+  // uses it to tell that its copy of this answer is from today, and every build compares it with its own UTC date.
+  const nowMs = Date.now();
+  const utcToday = new Date(nowMs).toISOString().slice(0, 10);
+  const startOfDay = businessDayStartIso(nowMs);
 
   // A purchase in progress uses up the daily limit too. A failed one gives its slot back.
   const boughtToday = db
     .prepare("SELECT matched_keyword, matched_rule_ids FROM leads WHERE business_id = ? AND status IN ('pending', 'retrieved') AND received_at >= ?")
-    .all(business.id, startOfUtcDay);
+    .all(business.id, startOfDay);
   const capturedToday = boughtToday.length;
 
   // The extension looks these counts up by rule id. The keyword text is kept for older clients.
@@ -73,12 +77,16 @@ export const GET = route(async (_request, { businessId }) => {
     features: { buyer_contact_fields: true },
     today: {
       utc_date: utcToday,
+      day: businessDate(nowMs),
+      day_started_at: startOfDay,
+      // How long these counts stay valid. A duration, so a PC clock that is wrong does not matter.
+      resets_in_ms: msUntilNextBusinessDay(nowMs),
       captured_count: capturedToday,
       keyword_captured_counts: keywordCapturedCounts,
     },
     settings: {
       daily_capture_limit: settings.daily_capture_limit ?? settings.daily_limit ?? 10,
-      max_daily_capture_limit: 50,
+      max_daily_capture_limit: MAX_DAILY_CAPTURE_LIMIT,
       daily_limit: settings.daily_limit ?? 10,
       auto_buy: Boolean(settings.auto_buy),
       allowed_countries: settings.allowed_countries ?? [],

@@ -52,7 +52,11 @@ function makeTab({ config = baseConfig(), pollerStarted = true } = {}) {
     },
   };
   const window = {
-    setTimeout: (fn, ms) => setTimeout(fn, Math.min(ms, 5)),
+    setTimeout: (fn, ms) => {
+      const timer = setTimeout(fn, Math.min(ms, 5));
+      timer.unref();
+      return timer;
+    },
     clearTimeout,
     location: { href: "https://seller.indiamart.com/bltxn/?pref=relevant", pathname: "/bltxn/" },
     addEventListener: () => void 0,
@@ -418,6 +422,9 @@ test("a buy with contacts sends them to the service worker in the fields the ser
   assert.equal(enriched.enrichment.buyer_email, "buyer@example.com");
   assert.equal(enriched.enrichment.purchase_id, "555001");
   assert.equal(enriched.enrichment.requirement_fields.Company, "Test Pharma LLC");
+  const timing = enriched.enrichment.buy_timing;
+  assert.equal(timing.retry, false);
+  for (const key of ["seen_to_sent_ms", "decide_ms", "slot_wait_ms", "answer_ms"]) assert.ok(Number.isInteger(timing[key]) && timing[key] >= 0 && timing[key] < 1000, `${key}: ${timing[key]}`);
 });
 
 test("a lost buy is reported as a final failure", async () => {
@@ -450,6 +457,14 @@ test("service worker: saved contacts are replayed once, and only to a server tha
   assert.equal(await replay(), 0, "never twice");
   assert.equal(transitions.length, 2);
   assert.match(source, /if \(config\.features\?\.buyer_contact_fields\) \{\s+void replaySavedBuyerContacts/);
+});
+
+test("the dashboard's download link names the version that is in the zip", async () => {
+  const { EXTENSION_VERSION, EXTENSION_DOWNLOAD_URL } = await import("../lib/version.js");
+  const zipped = JSON.parse(execFileSync("unzip", ["-p", "public/hi-san-bot-extension.zip", "manifest.json"]).toString("utf8"));
+  assert.equal(EXTENSION_VERSION, zipped.version, "update EXTENSION_VERSION in lib/version.js when the extension changes");
+  assert.equal(EXTENSION_VERSION, JSON.parse(readBundle("manifest.json")).version);
+  assert.equal(EXTENSION_DOWNLOAD_URL, `/hi-san-bot-extension.zip?v=${zipped.version}`);
 });
 
 test("the zip users download is the current extension", () => {
@@ -610,4 +625,94 @@ test("rules: a poll that was waiting decides with the keywords as they are when 
   const delay = await poll;
   await settle();
   assert.equal(tab.recorded()[0]?.local_decision.decision, "captured", JSON.stringify({ delay, poll: tab.storage.lastApiPoll, sent: tab.sent.map((m) => m.type) }));
+});
+
+test("measurement: every recorded lead says how and when it was first seen", async () => {
+  const tab = makeTab();
+  await tab.api.decideArrivedLeads([tab.parse(imRow({ ETO_OFR_ID: "73001" }))], "push");
+  await tab.api.decideArrivedLeads([tab.parse(imRow({ ETO_OFR_ID: "73002" }))], "page");
+  await settle();
+  const [pushed, listed] = tab.recorded();
+  assert.equal(pushed.seen.via, "push");
+  assert.equal(listed.seen.via, "page");
+  for (const lead of [pushed, listed]) {
+    assert.ok(Math.abs(Date.now() - lead.seen.at_ms) < 2000, "the time it reached the tab");
+    assert.equal(lead.seen.since_poll_ms, null, "no poll has answered yet");
+    assert.ok(lead.seen.decided_after_ms >= 0 && lead.seen.decided_after_ms < 500);
+    assert.equal(lead.local_decision.decision, "captured", "measuring changes no decision");
+  }
+  assert.equal(tab.buys.length, 2);
+});
+
+test("measurement: a lead pushed first and decided later still counts as seen by push", async () => {
+  const config = baseConfig({ phone_mode: "available" });
+  // Not the polling tab: a held-back lead would otherwise start the poll loop, which has no IndiaMART to talk to here.
+  const tab = makeTab({ config, pollerStarted: false });
+  const unknown = tab.parse(imRow({ ETO_OFR_ID: "73003", ETO_OFR_BUYER_IS_MOB_VERF: undefined, ETO_OFR_EMAIL_VERIFIED: undefined, BY_LEAD_TYPE: undefined, ETO_OFR_ADDITIONAL_DETAILS: undefined }));
+  await tab.api.decideArrivedLeads([unknown], "push");
+  await settle();
+  assert.equal(tab.recorded().length, 0, "held back for its contact flags");
+  const pushedAt = tab.api.getState("firstSightings").get("73003").at;
+
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  await tab.api.decideArrivedLeads([tab.parse(imRow({ ETO_OFR_ID: "73003" }))], "page");
+  await settle();
+  const [lead] = tab.recorded();
+  assert.equal(lead.seen.via, "push");
+  assert.equal(lead.seen.at_ms, pushedAt);
+  assert.ok(lead.seen.decided_after_ms >= 50, `decided ${lead.seen.decided_after_ms} ms after it was first seen`);
+});
+
+test("measurement: a polled lead is marked as polled, and later ones know how long ago the list was read", async () => {
+  const tab = makeTab();
+  const poll = tab.api.runApiPoll();
+  for (let turn = 0; turn < 50 && !tab.answerList; turn += 1) await new Promise((resolve) => setImmediate(resolve));
+  tab.answerList([imRow({ ETO_OFR_ID: "73004" })]);
+  await poll;
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  await tab.api.decideArrivedLeads([tab.parse(imRow({ ETO_OFR_ID: "73005" }))], "push");
+  await settle();
+  const [polled, pushed] = tab.recorded();
+  assert.equal(polled.seen.via, "poll");
+  assert.equal(polled.seen.since_poll_ms, null, "the first list this tab read");
+  assert.equal(pushed.seen.via, "push");
+  assert.ok(pushed.seen.since_poll_ms >= 30 && pushed.seen.since_poll_ms < 2000, `the list read ${pushed.seen.since_poll_ms} ms earlier did not have it`);
+});
+
+test("measurement: the sightings list cannot grow without limit", () => {
+  const { api } = loadContentScript();
+  api.noteSightings(Array.from({ length: 2500 }, (_, index) => ({ ofr_id: String(index) })), "poll", 1000);
+  const kept = api.getState("firstSightings");
+  assert.equal(kept.size, 2000);
+  assert.equal(kept.has("0"), false);
+  assert.equal(kept.has("2499"), true);
+  assert.deepEqual(plain(api.sightingOf({ ofr_id: "unknown" }, "push", 500, 800)), { via: "push", at_ms: 500, since_poll_ms: null, decided_after_ms: 300, ext: null });
+});
+
+test("measurement: the service worker adds how long ago the lead was seen, and nothing else", () => {
+  const source = readBundle("service-worker.js");
+  const start = source.indexOf("function withSendDelay(");
+  const withSendDelay = new Function(`${source.slice(start, source.indexOf("async function sendLeadBatch(", start))}; return withSendDelay;`)();
+  const event = { client_event_id: "b:im-ofr:1", title: "x", seen: { via: "push", at_ms: 10_000, since_poll_ms: 5, ext: "1.0.17" } };
+  assert.deepEqual(withSendDelay(event, 10_250), { ...event, seen: { ...event.seen, sent_after_ms: 250 } });
+  assert.equal(withSendDelay(event, 9_000).seen.sent_after_ms, 0, "never negative");
+  assert.equal(event.seen.sent_after_ms, undefined, "the stored event is not changed, so a retry measures afresh");
+  const plainEvent = { client_event_id: "b:im-ofr:2", title: "x" };
+  assert.equal(withSendDelay(plainEvent, 10_250), plainEvent);
+  assert.equal(withSendDelay({ seen: { at_ms: "soon" } }, 1).seen.sent_after_ms, undefined);
+  assert.match(source, /leads: claimed\.map\(\(record\) => withSendDelay\(record\.event\)\)/);
+});
+
+test("daily limit: counts from yesterday are not used once the server's day has ended", () => {
+  const { api } = loadContentScript();
+  const lead = plain(api.apiLeadToCapturedLead(api.parseBlApiRow(imRow()), "https://x"));
+  const counters = { captured: 0, keyword: {} };
+  const now = Date.now();
+  const config = (today) => ({ ...baseConfig(), requested_at: now - 60000, today: { ...baseConfig().today, ...today } });
+
+  assert.equal(api.decideLeadLocally(lead, config({ resets_in_ms: 3600000 }), counters, now).decision, "captured", "an hour of the day is left");
+  assert.equal(api.decideLeadLocally(lead, config({ resets_in_ms: 59000 }), counters, now), null, "the day ended a second ago: wait for fresh counts");
+  assert.equal(api.decideLeadLocally(lead, config({ resets_in_ms: 60001 }), counters, now).decision, "captured");
+  assert.equal(api.decideLeadLocally(lead, config({}), counters, now).decision, "captured", "a server from before this change sends no such number");
+  assert.equal(api.decideLeadLocally(lead, { ...config({ resets_in_ms: 1 }), requested_at: undefined }, counters, now).decision, "captured", "without a request time there is nothing to measure from");
 });

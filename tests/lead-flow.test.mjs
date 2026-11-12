@@ -449,6 +449,153 @@ test("the rules version changes whenever a keyword rule changes, and only then",
   assert.equal(await version(), start, "deleted");
 });
 
+// IndiaMART's own stamp for "posted": Indian time, whole seconds.
+const istStamp = (ms) => new Date(ms + 330 * 60000).toISOString().replace(/[-T:]/g, "").slice(0, 14);
+// What the content script and the service worker add to an event since 1.0.17.
+const seenBy = (via, agoMs, more = {}) => ({ via, at_ms: Date.now() - agoMs, since_poll_ms: null, decided_after_ms: 0, ext: "1.0.17", sent_after_ms: agoMs, ...more });
+
+test("timing: when and how a lead was first seen is recorded on the server's clock", async () => {
+  const { event } = await capture({ OFR_DATE: istStamp(Date.now() - 2000) });
+  const item = await ingest({ ...event, seen: seenBy("push", 400, { since_poll_ms: 2100 }) });
+  const lead = await getLead(item.lead_id);
+
+  assert.equal(lead.timing.seen_via, "push");
+  assert.equal(lead.timing.exact, true);
+  assert.equal(Date.parse(lead.received_at) - Date.parse(lead.timing.seen_at), 400, "the PC's clock plays no part");
+  assert.equal(lead.timing.posted_to_seen_ms, Date.parse(lead.timing.seen_at) - Date.parse(lead.timing.posted_at));
+  assert.ok(lead.timing.posted_to_seen_ms > 500 && lead.timing.posted_to_seen_ms < 3000, `posted about 2 s before, seen 0.4 s ago: ${lead.timing.posted_to_seen_ms}`);
+  assert.equal(lead.timing.since_poll_ms, 2100);
+  assert.equal(lead.timing.extension, "1.0.17");
+  assert.equal(lead.timing.buy, null);
+});
+
+test("timing: a lead from an older extension is measured at the server instead", async () => {
+  const { event } = await capture({ OFR_DATE: istStamp(Date.now() - 3000) });
+  const lead = await getLead((await ingest(event)).lead_id);
+  assert.equal(lead.timing.exact, false);
+  assert.equal(lead.timing.seen_via, null);
+  assert.equal(lead.timing.seen_at, null);
+  assert.equal(lead.timing.posted_to_seen_ms, Date.parse(lead.received_at) - Date.parse(lead.timing.posted_at));
+  assert.ok(lead.timing.posted_to_seen_ms >= 2000 && lead.timing.posted_to_seen_ms < 6000);
+});
+
+test("timing: a win keeps the purchase numbers it reported, a loss gets them from its note", async () => {
+  const won = await capture();
+  const wonItem = await ingest({ ...won.event, seen: seenBy("poll", 30) });
+  const numbers = { seen_to_sent_ms: 3, decide_ms: 2, slot_wait_ms: 0, answer_ms: 52, retry: false };
+  await enrich(wonItem.lead_id, { ...buyPayload(won.parsed), buy_timing: numbers });
+  assert.deepEqual(plain((await getLead(wonItem.lead_id)).timing.buy), numbers);
+  await enrich(wonItem.lead_id, { ...buyPayload(won.parsed), buy_timing: { ...numbers, answer_ms: 999 } });
+  const wonLead = await getLead(wonItem.lead_id);
+  assert.equal(wonLead.timing.buy.answer_ms, 52, "a resend keeps the first measurement");
+  assert.equal(wonLead.timing.seen_via, "poll", "and what was known about the sighting");
+  assert.equal(wonLead.timing.extension, "1.0.17");
+
+  const lost = await capture();
+  const lostItem = await ingest({ ...lost.event, seen: seenBy("push", 10) });
+  await fail(lost.event, "lost:Sorry, this Buylead expired just a minute ago. (posted 1.4 s before we saw it \u00b7 buy sent 2 ms after \u00b7 IndiaMART answered in 38 ms)");
+  assert.deepEqual(plain((await getLead(lostItem.lead_id)).timing.buy), { seen_to_sent_ms: 2, decide_ms: null, slot_wait_ms: null, answer_ms: 38, retry: false });
+});
+
+test("timing: a purchase without numbers, or with nonsense, is still stored as a win", async () => {
+  const { parsed, event } = await capture();
+  const item = await ingest({ ...event, seen: { via: "teleport", sent_after_ms: -9, since_poll_ms: "soon", ext: 5 } });
+  assert.equal((await enrich(item.lead_id, { ...buyPayload(parsed), buy_timing: { answer_ms: "fast" } })).status, 200);
+  const lead = await getLead(item.lead_id);
+  assert.equal(lead.status, "retrieved");
+  assert.equal(lead.phone, "+1 5550100123");
+  assert.equal(lead.timing.seen_via, null);
+  assert.equal(lead.timing.exact, false);
+  assert.equal(lead.timing.buy, null);
+});
+
+test("timing: sending the same event again keeps the first sighting", async () => {
+  const { event } = await capture();
+  const first = await ingest({ ...event, seen: seenBy("push", 100) });
+  const before = (await getLead(first.lead_id)).timing;
+  await ingest({ ...event, seen: seenBy("poll", 9000) });
+  assert.deepEqual(plain((await getLead(first.lead_id)).timing), plain(before));
+});
+
+test("timing: leads stored before this change show their posted time without any migration", async () => {
+  const db = new DatabaseSync(server.databasePath);
+  const ts = "2026-11-11T17:16:42.900Z";
+  db.prepare(
+    `INSERT INTO leads (id, business_id, external_id, title, country_code, country_name, status, decision, filter_reason, raw, received_at, decided_at)
+     VALUES ('lead_old_timing', ?, 'old-timing-1', 'Old lead', 'US', 'USA', 'not_retrieved', 'skipped', ?, ?, ?, ?)`
+  ).run(business, "lost:Sorry (posted 2 s before we saw it \u00b7 buy sent 2 ms after \u00b7 IndiaMART answered in 38 ms)", JSON.stringify({ indiamart_api: { offer_date: "20261111224640" } }), ts, ts);
+  db.close();
+  const lead = await getLead("lead_old_timing");
+  assert.equal(lead.timing.posted_at, "2026-11-11T17:16:40.000Z");
+  assert.equal(lead.timing.posted_to_seen_ms, 2900);
+  assert.equal(lead.timing.exact, false);
+  assert.equal(lead.timing.buy.answer_ms, 38);
+});
+
+test("daily limit: the dashboard and the extension can both change it, and both see the same range", async () => {
+  const url = `/businesses/${business}/filter-settings`;
+  const read = async () => (await server.call("GET", url)).data;
+  const sentToExtension = async () => (await server.call("GET", `/businesses/${business}/decision-config`)).data.settings;
+  const start = await read();
+  assert.equal(start.max_daily_capture_limit, 50, "the popup reads its upper bound from here; without it, it stopped at 11");
+  assert.equal((await sentToExtension()).max_daily_capture_limit, 50);
+
+  // The dashboard form before this fix: the whole settings object, with only daily_limit edited.
+  const oldForm = (await server.call("PUT", url, { ...start, daily_limit: 25 })).data;
+  assert.equal(oldForm.daily_limit, 25);
+  assert.equal(oldForm.daily_capture_limit, 25);
+  assert.equal((await sentToExtension()).daily_capture_limit, 25, "the bot gets the new limit");
+
+  // The dashboard form now: both names carry the new number.
+  const form = (await server.call("PUT", url, { ...oldForm, daily_limit: 30, daily_capture_limit: 30 })).data;
+  assert.equal(form.daily_capture_limit, 30);
+
+  // The extension popup: its own name only, beside other settings.
+  const popup = (await server.call("PUT", url, { allowed_countries: ["us", "gb", "au"], daily_capture_limit: 12 })).data;
+  assert.equal(popup.daily_limit, 12);
+  assert.equal(popup.daily_capture_limit, 12);
+
+  // Saving something else leaves the limit alone, even though both old numbers travel with it.
+  const other = (await server.call("PUT", url, { ...popup, min_quantity: 0 })).data;
+  assert.equal(other.daily_capture_limit, 12);
+
+  // Out of range: too high stops at the maximum, and nonsense changes nothing.
+  assert.equal((await server.call("PUT", url, { daily_capture_limit: 80 })).data.daily_capture_limit, 50);
+  for (const bad of [0, -3, "many", null]) {
+    assert.equal((await server.call("PUT", url, { daily_limit: bad })).data.daily_capture_limit, 50, `after ${JSON.stringify(bad)}`);
+  }
+  const stored = new DatabaseSync(server.databasePath).prepare("SELECT filter_settings FROM businesses WHERE id = ?").get(business).filter_settings;
+  assert.equal("max_daily_capture_limit" in JSON.parse(stored), false, "the range is not saved with the settings");
+
+  assert.equal((await server.call("PUT", url, { ...(await read()), daily_limit: 10, daily_capture_limit: 10 })).data.daily_capture_limit, 10);
+});
+
+test("daily limit: the day runs from midnight Indian time, and older extensions still accept the answer", async () => {
+  const today = async () => (await server.call("GET", `/businesses/${business}/decision-config`)).data.today;
+  const before = await today();
+  const dayStart = Math.floor((Date.now() + 330 * 60000) / 86400000) * 86400000 - 330 * 60000;
+  assert.equal(before.day_started_at, new Date(dayStart).toISOString());
+  assert.equal(before.day, new Date(Date.now() + 330 * 60000).toISOString().slice(0, 10));
+  assert.ok(before.resets_in_ms > 0 && before.resets_in_ms <= 86400000);
+  assert.equal(before.utc_date, new Date().toISOString().slice(0, 10), "every extension build compares this with its own UTC date; it must not become the Indian date");
+
+  const db = new DatabaseSync(server.databasePath);
+  const insert = db.prepare(
+    `INSERT INTO leads (id, business_id, external_id, title, status, decision, received_at, decided_at) VALUES (?, ?, ?, 'Day boundary', 'retrieved', 'captured', ?, ?)`
+  );
+  const lastNight = new Date(dayStart - 60000).toISOString();
+  const justAfterMidnight = new Date(dayStart + 1).toISOString();
+  insert.run("lead_day_before", business, "day-before", lastNight, lastNight);
+  insert.run("lead_day_after", business, "day-after", justAfterMidnight, justAfterMidnight);
+  db.close();
+  assert.equal((await today()).captured_count, before.captured_count + 1, "23:59 last night belongs to yesterday, 00:00 to today");
+
+  // What an extension from before this change does with the answer: it must still reach a decision.
+  const config = (await server.call("GET", `/businesses/${business}/decision-config`)).data;
+  const lead = plain(ext.apiLeadToCapturedLead(ext.parseBlApiRow(imRow({ ETO_OFR_ID: String(++nextId) })), "https://seller.indiamart.com/bltxn/"));
+  assert.ok(ext.decideLeadLocally(lead, { ...config, requested_at: Date.now() }, { captured: 0, keyword: {} }), "a fresh answer is used");
+});
+
 test("the totals always add up, with nothing counted twice", async () => {
   const leads = await allLeads();
   const by = (status) => leads.filter((lead) => lead.status === status).length;
@@ -464,7 +611,7 @@ test("the totals always add up, with nothing counted twice", async () => {
 
 test("existing endpoints keep their contract", async () => {
   const [lead] = await allLeads();
-  for (const key of ["id", "external_id", "client_event_id", "title", "quantity", "unit", "city", "state", "address", "buyer_name", "company", "email", "phone", "contacts", "status", "decision", "filter_reason", "matched_keyword", "received_at", "retrieved_at"]) {
+  for (const key of ["id", "external_id", "client_event_id", "title", "quantity", "unit", "city", "state", "address", "buyer_name", "company", "email", "phone", "contacts", "status", "decision", "filter_reason", "matched_keyword", "received_at", "retrieved_at", "timing"]) {
     assert.ok(key in lead, `lead.${key}`);
   }
   assert.deepEqual(Object.keys(lead.contacts).sort(), ["email", "phone", "whatsapp"]);

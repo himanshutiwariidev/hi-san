@@ -28,6 +28,20 @@ Extract the new version over the same folder and press **Reload** on `chrome://e
 
 Do not run another lead-buying extension on the same IndiaMART login while this one runs. Both see the same lead and both try to buy it, so one always records a failed purchase. To compare two bots, run them at different times, then paste `tools/compare-bots.js` into each one's service worker console.
 
+## The daily limit's day
+
+The daily purchase limit counts from midnight Indian time (set in `lib/businessDay.js`). "Bought today" on the dashboard and "Today" on the Leads page use the same day.
+
+## Lead timing
+
+From extension 1.0.17, each lead records how the bot first saw it (IndiaMART's live push, the bot's own list check, or the page's list), how long after IndiaMART posted it, and how fast the purchase request went. The times are placed on the server's clock, so an operator's PC clock does not matter. Nothing is measured by sending extra requests to IndiaMART.
+
+It is shown in the lead window, in the CSV export, and as `timing` on every lead in the API. For a summary of the last 24 hours:
+
+```bash
+HISAN_EMAIL=you@example.com HISAN_PASSWORD=... node tools/speed-report.mjs
+```
+
 ## Test
 
 ```bash

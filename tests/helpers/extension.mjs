@@ -13,7 +13,7 @@ const EXPORTS = [
   "isPollRateLimited", "nextSafetyBrake", "resetRealtimeThrottle", "startRealtimeLeadListener", "decidePolledLeads",
   "decideArrivedLeads", "shouldAutoEnrichMarker", "canBuyInThisTab", "alreadyDecided", "sweepDeferredLeads", "rememberMarkers",
   "recordEnrichmentAttempt", "restoreDecidedLeadKeys", "isBuyLeadPath", "parseRealtimeLeadMessage",
-  "keywordMatcher", "buyTimingNote", "startCaptureStateSync", "startPageDataListener", "runApiPoll",
+  "keywordMatcher", "buyTimingNote", "startCaptureStateSync", "startPageDataListener", "runApiPoll", "noteSightings", "sightingOf",
 ];
 
 // Runs content-script.js in a fresh VM. The bundle only boots itself when window and chrome exist,

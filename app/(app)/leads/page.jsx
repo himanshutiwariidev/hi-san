@@ -15,6 +15,7 @@ import LeadStatus from "@/components/leads/LeadStatus";
 import { ContactPills } from "@/components/leads/Contacts";
 import { useApp } from "@/components/AppContext";
 import { apiClient } from "@/lib/api";
+import { businessDayStart } from "@/lib/businessDay";
 import { formatDateTime } from "@/lib/format";
 import { useResource } from "@/lib/useResource";
 
@@ -48,24 +49,27 @@ function LeadsView() {
   const [selected, setSelected] = useState(null);
 
   const days = ranges.find((r) => r.value === range).days;
+  // "Today" is the same day the daily limit counts in: from midnight Indian time, not the last 24 hours.
+  const windowStart = () => (range === "today" ? businessDayStart() : Date.now() - days * DAY);
   // Fetch two windows so the trend can compare against the previous period.
   const leadsRes = useResource(
-    () => apiClient.listLeads(business.id, { since: days ? new Date(Date.now() - 2 * days * DAY).toISOString() : undefined, limit: 5000 }),
+    () => apiClient.listLeads(business.id, { since: days ? new Date(windowStart() - days * DAY).toISOString() : undefined, limit: 5000 }),
     [business.id, range],
     { refreshMs: 30000 }
   );
   const leads = useMemo(() => leadsRes.data ?? [], [leadsRes.data]);
 
   const inRange = useMemo(
-    () => (days ? leads.filter((l) => Date.now() - new Date(l.received_at).getTime() < days * DAY) : leads),
-    [leads, days]
+    () => (days ? leads.filter((l) => new Date(l.received_at).getTime() >= windowStart()) : leads),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [leads, days, range]
   );
 
   const stats = useMemo(() => {
     const previous = days
       ? leads.filter((l) => {
-          const age = Date.now() - new Date(l.received_at).getTime();
-          return age >= days * DAY && age < 2 * days * DAY;
+          const at = new Date(l.received_at).getTime();
+          return at < windowStart() && at >= windowStart() - days * DAY;
         })
       : [];
     const count = (list, key) => (key === "total" ? list.length : list.filter((l) => l.status === key).length);
@@ -102,9 +106,9 @@ function LeadsView() {
   }, [inRange, statusParam, keyword, country, contact, reason, query]);
 
   function exportCsv() {
-    const header = ["indiamart_id", "title", "quantity", "unit", "keyword", "buyer", "company", "city", "state", "country", "email", "phone", "gst_verified", "status", "decision", "reason", "received_at", "reason_label", "reason_type", "reason_detail"];
+    const header = ["indiamart_id", "title", "quantity", "unit", "keyword", "buyer", "company", "city", "state", "country", "email", "phone", "gst_verified", "status", "decision", "reason", "received_at", "reason_label", "reason_type", "reason_detail", "seen_via", "posted_to_seen_ms", "buy_seen_to_sent_ms", "buy_answer_ms"];
     const lines = rows.map((l) =>
-      [l.external_id, l.title, l.quantity, l.unit, l.matched_keyword, l.buyer_name, l.company, l.city, l.state, l.country.name, l.email, l.phone, l.gst_verified ? "Yes" : "No", l.status, l.decision, l.filter_reason, l.received_at, l.reason?.label, l.reason?.group, l.reason?.detail]
+      [l.external_id, l.title, l.quantity, l.unit, l.matched_keyword, l.buyer_name, l.company, l.city, l.state, l.country.name, l.email, l.phone, l.gst_verified ? "Yes" : "No", l.status, l.decision, l.filter_reason, l.received_at, l.reason?.label, l.reason?.group, l.reason?.detail, l.timing?.seen_via, l.timing?.posted_to_seen_ms, l.timing?.buy?.seen_to_sent_ms, l.timing?.buy?.answer_ms]
         .map((v) => `"${String(v ?? "").replace(/"/g, '""')}"`)
         .join(",")
     );

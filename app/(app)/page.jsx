@@ -14,6 +14,7 @@ import LeadStatus from "@/components/leads/LeadStatus";
 import { useApp } from "@/components/AppContext";
 import { tones } from "@/components/tones";
 import { apiClient } from "@/lib/api";
+import { businessDayStartIso } from "@/lib/businessDay";
 import { daysAgo, endOfDayIso, isOnline, localDateString, startOfDayIso, timeAgo } from "@/lib/dates";
 import { formatDateTime } from "@/lib/format";
 import { useResource } from "@/lib/useResource";
@@ -85,8 +86,6 @@ function countBy(list, keyFn) {
   return [...map.entries()].sort((a, b) => b[1] - a[1]);
 }
 
-// The daily purchase limit is enforced per UTC day, so "Bought today" has to count the same window.
-const startOfUtcDay = () => `${new Date().toISOString().slice(0, 10)}T00:00:00.000Z`;
 
 export default function DashboardPage() {
   const { business } = useApp();
@@ -102,7 +101,7 @@ export default function DashboardPage() {
     [business.id, from, to],
     { refreshMs: 30000 }
   );
-  const todayRes = useResource(() => apiClient.listLeads(business.id, { since: startOfUtcDay() }), [business.id], { refreshMs: 30000 });
+  const todayRes = useResource(() => apiClient.listLeads(business.id, { since: businessDayStartIso() }), [business.id], { refreshMs: 30000 });
   const settingsRes = useResource(() => apiClient.getFilterSettings(business.id), [business.id]);
   const extensionRes = useResource(() => apiClient.getExtension(business.id), [business.id], { refreshMs: 30000 });
 
