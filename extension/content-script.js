@@ -768,8 +768,8 @@
       contact_fields: buyer.contact_fields ?? []
     };
   }
-  var BUY_CONCURRENCY = 3;
-  var RETRY_BUY_SLOTS = 1;
+  var BUY_CONCURRENCY = 8;
+  var RETRY_BUY_SLOTS = 2;
   function createBuyQueue(slots, clock = () => Date.now(), retrySlots = RETRY_BUY_SLOTS) {
     const fresh = [];
     const retry = [];
