@@ -1689,7 +1689,7 @@
   var DECISION_CONFIG_STORAGE_KEY = "decisionConfig";
   var CAPTURE_STATE_KEYS = ["authSession", "selectedBusinessId", "billingEntitlement", "botEnabled", DECISION_CONFIG_STORAGE_KEY];
   var KEEPALIVE_PORT_NAME = "im-leads-keepalive";
-  var KEEPALIVE_PING_MS = 2e4;
+  var KEEPALIVE_PING_MS = 1e4;
   var FLUSH_BEFORE_RELOAD_MAX_MS = 1500;
   var INACTIVITY_POPUP_SELECTORS = [".Bl_admin_modal-content", ".sm_inn_pop_n"];
   var INACTIVITY_DIALOG_CANDIDATES = "[role='dialog'], [role='alertdialog'], .modal, [class*='modal' i], [class*='popup' i], [id*='popup' i], [class*='overlay' i]";
@@ -3024,6 +3024,60 @@
     window.setInterval(checkForInactivityPopup, INACTIVITY_CHECK_INTERVAL_MS);
     checkForInactivityPopup();
   }
+  function startBackgroundKeepAlive() {
+    if (typeof window === "undefined" || typeof document === "undefined") {
+      return;
+    }
+    // 1. Silent Web Audio: Keeps Chrome from throttling timers and WebSocket in background/minimized tabs
+    try {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      if (AudioCtx) {
+        const audioCtx = new AudioCtx();
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        gain.gain.value = 0.00001;
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.start();
+        const resumeAudio = () => {
+          if (audioCtx.state === "suspended") {
+            audioCtx.resume().catch(() => void 0);
+          }
+        };
+        document.addEventListener("visibilitychange", resumeAudio);
+        window.addEventListener("focus", resumeAudio);
+      }
+    } catch (_) {}
+
+    // 2. Unthrottled Web Worker Ticker: Runs on background thread to wake event loop and reset throttle
+    try {
+      if (typeof Worker !== "undefined" && typeof Blob !== "undefined" && typeof URL !== "undefined") {
+        const workerBlob = new Blob([
+          "let t=null;self.onmessage=function(e){if(e.data==='start'){if(t)clearInterval(t);t=setInterval(function(){self.postMessage('ping');},5000);}};"
+        ], { type: "application/javascript" });
+        const worker = new Worker(URL.createObjectURL(workerBlob));
+        worker.onmessage = () => {
+          // Keep main event loop awake in background
+        };
+        worker.postMessage("start");
+      }
+    } catch (_) {}
+
+    // 3. Screen Wake Lock: Prevents system/network power-saving sleep
+    try {
+      if (typeof navigator !== "undefined" && "wakeLock" in navigator && typeof navigator.wakeLock?.request === "function") {
+        const acquireLock = async () => {
+          try {
+            await navigator.wakeLock.request("screen");
+          } catch (_) {}
+        };
+        void acquireLock();
+        document.addEventListener("visibilitychange", () => {
+          if (document.visibilityState === "visible") void acquireLock();
+        });
+      }
+    } catch (_) {}
+  }
   function startServiceWorkerKeepalive() {
     let port = null;
     const connect = () => {
@@ -3114,6 +3168,7 @@
       startRealtimeLeadListener();
       startApiPoller();
       startCaptureStateSync();
+      startBackgroundKeepAlive();
       startServiceWorkerKeepalive();
       startInactivityWatcher();
       startExpiredInterest();
