@@ -10,10 +10,11 @@ export const EXTENSION_DIR = process.env.HISAN_EXTENSION_DIR ?? path.join(ROOT, 
 const EXPORTS = [
   "parseBlApiRow", "parseBlDisplayData", "parseBlClosedLeads", "parseBuyResult", "enrichmentFromBuy", "enrichmentHasBuyerData",
   "apiLeadToCapturedLead", "apiLeadClientEventId", "decideLeadLocally", "classifyLeadLocally", "explainSkip", "createBuyQueue",
-  "isPollRateLimited", "nextSafetyBrake", "resetRealtimeThrottle", "startRealtimeLeadListener", "decidePolledLeads",
+  "isPollRateLimited", "nextSafetyBrake", "resetRealtimeThrottle", "resetRealtimeThrottleWhileWatching", "startRealtimeLeadListener", "decidePolledLeads",
   "decideArrivedLeads", "shouldAutoEnrichMarker", "canBuyInThisTab", "alreadyDecided", "sweepDeferredLeads", "rememberMarkers",
   "recordEnrichmentAttempt", "restoreDecidedLeadKeys", "isBuyLeadPath", "parseRealtimeLeadMessage",
   "keywordMatcher", "buyTimingNote", "startCaptureStateSync", "startPageDataListener", "runApiPoll", "noteSightings", "sightingOf",
+  "isLongSafetyBrake", "sellerResumedBrake", "resumeSafetyBrakeBySeller",
 ];
 
 // Runs content-script.js in a fresh VM. The bundle only boots itself when window and chrome exist,

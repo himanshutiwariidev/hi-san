@@ -817,6 +817,11 @@
           job.resolve(null);
         }
       },
+      // Ends a pause early (the seller verified with OTP on IndiaMART and pressed Resume Now).
+      resume() {
+        pausedUntil = 0;
+        pump();
+      },
       get running() {
         return running;
       },
@@ -863,6 +868,18 @@
     return Boolean(brake && brake.until > now);
   }
   var SAFETY_BRAKE_STORAGE_KEY = "imSafetyBrake";
+  // A pause this long (IndiaMART's 15-minute block) can be ended early by the seller, after verifying with OTP on
+  // IndiaMART. Shorter pauses always run out by themselves. Either way the bot carries on by itself when a pause ends.
+  var LONG_SAFETY_BRAKE_MS = 10 * 6e4;
+  var SAFETY_BRAKE_WARNING_CHECK_MESSAGE = "SAFETY_BRAKE_WARNING_CHECK";
+  var SAFETY_BRAKE_RESUME_MESSAGE = "SAFETY_BRAKE_RESUME";
+  function isLongSafetyBrake(brake, now = Date.now()) {
+    return safetyBrakeActive(brake, now) && brake.until - (brake.tripped_at ?? brake.until) >= LONG_SAFETY_BRAKE_MS;
+  }
+  // Ends the pause now. The step and the time it tripped stay, so another warning soon after still pauses for 15 minutes.
+  function sellerResumedBrake(brake, now = Date.now()) {
+    return { ...brake, until: now, resumed_at: now };
+  }
   function pollGapMsFrom(stored) {
     const seconds = stored?.poll_gap_seconds;
     const gapMs = typeof seconds === "number" && Number.isFinite(seconds) ? seconds * 1e3 : NaN;
@@ -2098,14 +2115,13 @@
           lastListRequestAt = Math.max(lastListRequestAt, Number(changes[LAST_LIST_REQUEST_STORAGE_KEY].newValue) || 0);
         }
         if (changes[SAFETY_BRAKE_STORAGE_KEY]) {
-          const prevBrake = safetyBrake;
+          const wasOn = brakeOn();
           safetyBrake = changes[SAFETY_BRAKE_STORAGE_KEY].newValue ?? null;
           if (brakeOn()) {
             buyQueue.pause(safetyBrake?.until ?? 0);
-          } else if (prevBrake && !safetyBrake) {
-            // Safety brake manually cleared (Resume Now button) — immediately resume polling
-            buyQueue.pause(0);
-            pollSoon();
+          } else if (wasOn) {
+            // The pause ended early (Resume Now in another tab or the popup): list checks and buying carry on now.
+            continueAfterSafetyBrake();
           }
         }
         if (changes[MARKER_STORAGE_KEY]) {
@@ -2478,17 +2494,32 @@
       return null;
     }
   }
+  // The repeated resets (worker tick, timer, push message) run only while the bot is on and not in a safety pause,
+  // so IndiaMART's reconnect limit is never lifted after it has asked the bot to slow down. The page-load reset is unchanged.
+  var realtimeResetStateLoaded = false;
+  function resetRealtimeThrottleWhileWatching(now = Date.now()) {
+    if (!realtimeResetStateLoaded || !captureState) {
+      void Promise.all([readCaptureState(), loadPollSharedState()]).then(() => {
+        realtimeResetStateLoaded = true;
+      }).catch(() => void 0);
+      return false;
+    }
+    if (!isBotRunning(captureState) || brakeOn(now)) {
+      return false;
+    }
+    return resetRealtimeThrottle(safeLocalStorage(), now);
+  }
   function startRealtimeLeadListener() {
     if (realtimeListenerStarted || typeof BroadcastChannel === "undefined") {
       return;
     }
     realtimeListenerStarted = true;
     resetRealtimeThrottle();
-    window.setInterval(resetRealtimeThrottle, 15000);
+    window.setInterval(() => resetRealtimeThrottleWhileWatching(), 15000);
     try {
       const channel = new BroadcastChannel(REALTIME_CHANNEL_NAME);
       channel.addEventListener("message", (event) => {
-        resetRealtimeThrottle();
+        resetRealtimeThrottleWhileWatching();
         const leads = parseRealtimeLeadMessage(event.data);
         if (leads.length) {
           void decideArrivedLeads(leads, "push").catch(() => void 0);
@@ -2534,6 +2565,34 @@
       lastSafetyBrake: { ...safetyBrake, detail: detail ?? null, at: new Date(now).toISOString() }
     });
     return safetyBrake.until;
+  }
+  function continueAfterSafetyBrake() {
+    buyQueue.resume();
+    lastApiPollPenalized = false;
+    pollSoon();
+  }
+  // Resume Now: only for a long pause, and only once IndiaMART's warning is gone from this page (the seller verified
+  // with OTP). The pause record and its step are kept. If IndiaMART still blocks, the next request trips the brake again.
+  async function resumeSafetyBrakeBySeller(now = Date.now()) {
+    const stored = await safeStorageGet([SAFETY_BRAKE_STORAGE_KEY, "lastSafetyBrake"]) ?? {};
+    const brake = stored[SAFETY_BRAKE_STORAGE_KEY] ?? safetyBrake;
+    if (!safetyBrakeActive(brake, now)) {
+      return { ok: true, already_running: true };
+    }
+    if (!isLongSafetyBrake(brake, now)) {
+      return { ok: false, reason: "short_pause" };
+    }
+    if (findActivityWarningPopup()) {
+      return { ok: false, reason: "warning_visible" };
+    }
+    safetyBrake = sellerResumedBrake(brake, now);
+    const last = stored.lastSafetyBrake;
+    await safeStorageSet({
+      [SAFETY_BRAKE_STORAGE_KEY]: safetyBrake,
+      ...last && last.tripped_at === brake.tripped_at ? { lastSafetyBrake: { ...last, resumed_at: new Date(now).toISOString() } } : {}
+    });
+    continueAfterSafetyBrake();
+    return { ok: true };
   }
   async function runApiPoll() {
     lastApiPollPenalized = false;
@@ -3070,8 +3129,8 @@
         ], { type: "application/javascript" });
         const worker = new Worker(URL.createObjectURL(workerBlob));
         worker.onmessage = () => {
-          // Keep main event loop awake in background and reset XMPP throttle
-          resetRealtimeThrottle();
+          // Keep main event loop awake in background and reset XMPP throttle (only while the bot is on and not paused)
+          resetRealtimeThrottleWhileWatching();
         };
         worker.postMessage("start");
       }
@@ -3187,7 +3246,18 @@
       startInactivityWatcher();
       startExpiredInterest();
     }
-    chrome.runtime.onMessage.addListener((message) => {
+    chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+      if (message?.type === SAFETY_BRAKE_WARNING_CHECK_MESSAGE) {
+        sendResponse({
+          warning: Boolean(findActivityWarningPopup()),
+          buy_leads_tab: window.top === window && isBuyLeadPath(window.location.pathname)
+        });
+        return;
+      }
+      if (message?.type === SAFETY_BRAKE_RESUME_MESSAGE) {
+        void resumeSafetyBrakeBySeller().then(sendResponse, () => sendResponse({ ok: false, reason: "error" }));
+        return true;
+      }
       if (message?.type === "BUSINESS_SELECTION_CHANGED") {
         resetLeadTracking();
         pollNow();

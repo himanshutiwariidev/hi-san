@@ -971,6 +971,11 @@ select:disabled {
   cursor: not-allowed;
 }
 
+.safety-brake .resume-note {
+  font-weight: 600;
+  margin: 6px 0 0;
+}
+
 @media (prefers-color-scheme: dark) {
   .safety-brake,
   .log-brake {

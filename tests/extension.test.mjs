@@ -78,8 +78,8 @@ function makeTab({ config = baseConfig(), pollerStarted = true } = {}) {
     if (type === channels.response) tab.listeners.push(listener);
     if (type === "message") tab.messageListeners.push(listener);
   };
-  const { api } = loadContentScript({ chrome, window, CustomEvent: class { constructor(type, init) { this.type = type; this.detail = init.detail; } } });
-  const tab = { api, sent, buys, storage, config, listeners: [], messageListeners: [], buyAnswer: null, window };
+  const { api, context } = loadContentScript({ chrome, window, CustomEvent: class { constructor(type, init) { this.type = type; this.detail = init.detail; } } });
+  const tab = { api, context, sent, buys, storage, config, listeners: [], messageListeners: [], buyAnswer: null, window };
   // What chrome.storage does when the service worker saves a newer value.
   tab.storageChanged = (changes) => storageListeners.forEach((listener) => listener(Object.fromEntries(Object.entries(changes).map(([key, newValue]) => [key, { newValue }])), "local"));
   api.setState("storedMarkersLoaded", true);
@@ -92,11 +92,73 @@ function makeTab({ config = baseConfig(), pollerStarted = true } = {}) {
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 25));
 
-test("throttle reset: the mechanism is still there and runs periodically and on page load", () => {
+test("throttle reset: the mechanism is still there, runs once on page load, and repeats only through the guarded call", () => {
   const source = readBundle("content-script.js");
   assert.match(source, /function resetRealtimeThrottle\(storage = safeLocalStorage\(\), now = Date\.now\(\)\)/);
-  assert.ok(source.match(/resetRealtimeThrottle\(\);/g).length >= 1);
+  // Exactly one unguarded call: the page-load reset.
+  assert.equal(source.match(/resetRealtimeThrottle\(\);/g).length, 1);
+  // The timer, the push message and the background worker tick all go through the guard.
+  assert.equal(source.match(/resetRealtimeThrottleWhileWatching\(\)/g).length, 3);
+  assert.match(source, /window\.setInterval\(\(\) => resetRealtimeThrottleWhileWatching\(\), 15000\)/);
+  assert.match(source, /worker\.onmessage = \(\) => \{[^}]*resetRealtimeThrottleWhileWatching\(\);/);
   assert.match(source, /var XMPP_MINUTE_LIMIT = 15;/);
+});
+
+test("throttle reset: the repeated reset never runs while the bot is off or in a safety pause", () => {
+  const { api, context } = loadContentScript();
+  let saved = "";
+  const fill = () => (saved = JSON.stringify({ a: { minuteCount: 15, minuteTimestamp: Date.now() - 1000 } }));
+  const count = () => JSON.parse(saved).a.minuteCount;
+  const timers = [];
+  const listeners = [];
+  context.localStorage = { getItem: () => saved, setItem: (_key, next) => (saved = next) };
+  context.window = { setInterval: (fn, ms) => timers.push({ fn, ms }) };
+  context.BroadcastChannel = class {
+    addEventListener(_type, fn) {
+      listeners.push(fn);
+    }
+  };
+  const tick = () => {
+    timers.forEach((timer) => timer.fn());
+    listeners.forEach((fn) => fn({ data: {} }));
+  };
+
+  fill();
+  api.startRealtimeLeadListener();
+  assert.equal(count(), 0, "the page-load reset runs as before");
+  assert.equal(timers.length, 1);
+  assert.equal(timers[0].ms, 15000);
+  assert.equal(listeners.length, 1);
+
+  // Before the tab knows the bot state, nothing is reset.
+  fill();
+  api.setState("captureState", null);
+  api.setState("realtimeResetStateLoaded", false);
+  tick();
+  assert.equal(count(), 15, "not before the bot state is known");
+
+  api.setState("realtimeResetStateLoaded", true);
+  api.setState("captureState", { botEnabled: false });
+  tick();
+  assert.equal(count(), 15, "not while the bot is off");
+
+  api.setState("captureState", { botEnabled: true });
+  api.setState("safetyBrake", { until: Date.now() + 120000, step: 0, tripped_at: Date.now(), reason: "list_activity_warning" });
+  tick();
+  assert.equal(count(), 15, "not during a safety pause");
+  assert.equal(api.resetRealtimeThrottleWhileWatching(), false);
+
+  api.setState("safetyBrake", { until: Date.now() - 1000, step: 0, tripped_at: Date.now() - 121000, reason: "list_activity_warning" });
+  timers[0].fn();
+  assert.equal(count(), 0, "the timer resets once the bot is on and the pause is over");
+
+  fill();
+  listeners[0]({ data: {} });
+  assert.equal(count(), 0, "a push message resets too");
+
+  api.setState("safetyBrake", null);
+  fill();
+  assert.equal(api.resetRealtimeThrottleWhileWatching(), true);
 });
 
 test("throttle reset: it clears a full window and leaves a live one alone", () => {
@@ -371,6 +433,125 @@ test("safety: nothing is bought while the brake is on, and the lead waits", asyn
   assert.equal(tab.buys.length, 0);
   assert.equal(tab.recorded().length, 1, "recorded as pending, not dropped");
   assert.equal(tab.recorded()[0].local_decision.decision, "captured");
+});
+
+const MINUTE = 60000;
+// IndiaMART's high-activity warning on the page, as the content script looks for it. Set after loading, so the
+// bundle does not boot itself.
+function showWarning(tab, text) {
+  tab.window.getComputedStyle = () => ({ visibility: "visible", display: "block", opacity: "1" });
+  tab.context.document = { querySelectorAll: () => (text ? [{ innerText: text, textContent: text, getClientRects: () => [{}] }] : []) };
+}
+const longBrake = (now = Date.now()) => ({ until: now + 15 * MINUTE, step: 2, tripped_at: now - 1000, reason: "list_activity_warning" });
+// A BuyLeads tab in the middle of a pause: the pause is stored, buying is paused, and the next list check waits.
+function pausedTab(brake) {
+  const tab = makeTab();
+  tab.storage.imSafetyBrake = brake;
+  tab.storage.lastSafetyBrake = { ...brake, detail: "IndiaMART reported high activity", at: new Date(brake.tripped_at).toISOString() };
+  tab.api.setState("safetyBrake", brake);
+  tab.api.getState("buyQueue").pause(brake.until);
+  tab.api.setState("lastApiPollPenalized", true);
+  showWarning(tab, null);
+  return tab;
+}
+// The fake page shortens every timer to 5 ms, so a list check that is due soon goes out within a few turns.
+async function listRequested(tab) {
+  for (let turn = 0; turn < 40 && !tab.answerList; turn += 1) await new Promise((resolve) => setTimeout(resolve, 3));
+  return typeof tab.answerList === "function";
+}
+const tryToBuy = (tab) => tab.api.getState("buyQueue").enqueue(async () => "bought", "fresh");
+
+test("resume now: only a long pause (IndiaMART's 15-minute block) can be ended early", () => {
+  const { api } = loadContentScript();
+  const now = 1_000_000;
+  const brake = (minutes) => ({ until: now + minutes * MINUTE, step: 0, tripped_at: now, reason: "x" });
+  assert.equal(api.isLongSafetyBrake(brake(15), now), true);
+  assert.equal(api.isLongSafetyBrake(brake(10), now), true, "a 10-minute Retry-After counts");
+  assert.equal(api.isLongSafetyBrake(brake(5), now), false);
+  assert.equal(api.isLongSafetyBrake(brake(2), now), false);
+  assert.equal(api.isLongSafetyBrake(brake(15), now + 16 * MINUTE), false, "a pause that has ended");
+  assert.equal(api.isLongSafetyBrake(null, now), false);
+  const third = api.nextSafetyBrake(api.nextSafetyBrake(api.nextSafetyBrake(null, "x", null, now), "x", null, now + 1000), "x", null, now + 2000);
+  assert.equal(api.isLongSafetyBrake(third, now + 2000), true, "the third warning's 15-minute pause");
+});
+
+test("resume now: after OTP the bot buys and checks the list at once, and keeps the pause record and step", async () => {
+  const brake = longBrake();
+  const tab = pausedTab(brake);
+  assert.equal(await tryToBuy(tab), null, "paused before");
+  assert.deepEqual(plain(await tab.api.resumeSafetyBrakeBySeller()), { ok: true });
+  const stored = tab.storage.imSafetyBrake;
+  assert.ok(stored.until <= Date.now(), "the pause has ended");
+  assert.equal(stored.step, 2);
+  assert.equal(stored.tripped_at, brake.tripped_at);
+  assert.equal(stored.reason, brake.reason);
+  assert.equal(typeof stored.resumed_at, "number");
+  assert.equal(tab.storage.lastSafetyBrake.detail, "IndiaMART reported high activity", "why it paused is kept");
+  assert.equal(typeof tab.storage.lastSafetyBrake.resumed_at, "string");
+  assert.equal(await tryToBuy(tab), "bought", "buying runs straight away");
+  assert.ok(await listRequested(tab), "the list is checked straight away, not at the end of the old pause");
+});
+
+test("resume now: refused while IndiaMART's warning is still showing, and a short pause is never ended early", async () => {
+  const brake = longBrake();
+  const tab = pausedTab(brake);
+  showWarning(tab, "We have noticed high activity on your account. Please verify with OTP to continue.");
+  assert.deepEqual(plain(await tab.api.resumeSafetyBrakeBySeller()), { ok: false, reason: "warning_visible" });
+  assert.equal(tab.storage.imSafetyBrake.until, brake.until, "the pause is unchanged");
+  assert.equal(await tryToBuy(tab), null);
+
+  const short = { until: Date.now() + 5 * MINUTE, step: 1, tripped_at: Date.now(), reason: "list_rate_limited" };
+  const shortTab = pausedTab(short);
+  assert.deepEqual(plain(await shortTab.api.resumeSafetyBrakeBySeller()), { ok: false, reason: "short_pause" });
+  assert.equal(shortTab.storage.imSafetyBrake.until, short.until);
+  assert.equal(await tryToBuy(shortTab), null);
+});
+
+test("resume now: another warning soon after a resume still pauses for 15 minutes", () => {
+  const { api } = loadContentScript();
+  const now = 1_000_000;
+  const brake = { until: now + 15 * MINUTE, step: 2, tripped_at: now, reason: "list_activity_warning" };
+  const resumed = api.sellerResumedBrake(brake, now + MINUTE);
+  assert.equal(resumed.until, now + MINUTE);
+  assert.equal(resumed.step, 2);
+  assert.equal(resumed.tripped_at, now);
+  const again = api.nextSafetyBrake(resumed, "list_activity_warning", null, now + 3 * MINUTE);
+  assert.equal(again.step, 2);
+  assert.equal(again.until - (now + 3 * MINUTE), 15 * MINUTE);
+  // Deleting the stored pause, as 1.0.20's button did, would have dropped the next pause to 2 minutes.
+  assert.equal(api.nextSafetyBrake(null, "list_activity_warning", null, now + 3 * MINUTE).until - (now + 3 * MINUTE), 2 * MINUTE);
+});
+
+test("resume now: a resume from the popup or another tab starts this tab too", async () => {
+  const brake = longBrake();
+  const tab = pausedTab(brake);
+  tab.api.startCaptureStateSync();
+  // What chrome.storage does when another tab saves the ended pause: the value changes, then every tab is told.
+  tab.storage.imSafetyBrake = { ...brake, until: Date.now(), resumed_at: Date.now() };
+  tab.storageChanged({ imSafetyBrake: tab.storage.imSafetyBrake });
+  assert.equal(await tryToBuy(tab), "bought");
+  assert.ok(await listRequested(tab));
+});
+
+test("no resume: a long pause nobody ends runs out by itself, and the bot carries on", async () => {
+  const now = Date.now();
+  const brake = { until: now + 60, step: 2, tripped_at: now + 60 - 15 * MINUTE, reason: "list_activity_warning" };
+  const tab = pausedTab(brake);
+  assert.equal(await tryToBuy(tab), null, "paused");
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(await tryToBuy(tab), "bought", "buying carries on when the pause runs out");
+  const poll = tab.api.runApiPoll();
+  assert.ok(await listRequested(tab), "the list check carries on");
+  tab.answerList([]);
+  await poll;
+  assert.equal(tab.storage.imSafetyBrake.until, brake.until, "nobody had to press anything");
+});
+
+test("resume now: the popup never deletes the pause record, and offers Resume Now only in a long pause", () => {
+  const popup = readBundle("popup.js");
+  assert.doesNotMatch(popup, /storage\.local\.remove\([^)]*(SAFETY_BRAKE_STORAGE_KEY|imSafetyBrake|lastSafetyBrake)/);
+  assert.match(popup, /resumeRow\.hidden = !isLongSafetyBrake\(brake\)/);
+  assert.match(readBundle("popup.html"), /<div id="resume-row" hidden>/);
 });
 
 test("safety: request limits and polling speed are unchanged", () => {

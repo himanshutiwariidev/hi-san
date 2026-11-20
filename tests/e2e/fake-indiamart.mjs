@@ -24,13 +24,14 @@ export async function startFakeIndiaMart(port) {
 
   // buyDelayMs: how long a successful purchase takes to answer. duplicateBuy: what a second purchase of the same
   // lead by this account gets ("success" repeats the answer, "consumed" is refused at once, as a sold-out lead is).
-  const state = { rows: [], listStatus: 200, lostIds: new Set(), lists: [], buys: [], bought: new Set(), buyDelayMs: 0, duplicateBuy: "success" };
+  // retryAfter: the Retry-After seconds sent with a refused list (IndiaMART's 15-minute block is 900).
+  const state = { rows: [], listStatus: 200, retryAfter: null, lostIds: new Set(), lists: [], buys: [], bought: new Set(), buyDelayMs: 0, duplicateBuy: "success" };
   const server = https.createServer({ key: fs.readFileSync(key), cert: fs.readFileSync(cert) }, (request, response) => {
     let body = "";
     request.on("data", (chunk) => (body += chunk));
     request.on("end", () => {
-      const send = (status, json) => {
-        response.writeHead(status, { "content-type": "application/json" });
+      const send = (status, json, headers = {}) => {
+        response.writeHead(status, { "content-type": "application/json", ...headers });
         response.end(JSON.stringify(json));
       };
       const url = new URL(request.url, "https://seller.indiamart.com");
@@ -40,7 +41,9 @@ export async function startFakeIndiaMart(port) {
       }
       if (url.pathname === "/blreact/getBLDisplayData") {
         state.lists.push({ at: Date.now(), body: JSON.parse(body || "{}") });
-        return state.listStatus === 200 ? send(200, { DisplayList: state.rows }) : send(state.listStatus, { error: "slow down" });
+        return state.listStatus === 200
+          ? send(200, { DisplayList: state.rows })
+          : send(state.listStatus, { error: "slow down" }, state.retryAfter ? { "retry-after": String(state.retryAfter) } : {});
       }
       if (url.pathname === "/blreact/contactBuyNow") {
         const { ofrid } = JSON.parse(body || "{}");
