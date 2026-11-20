@@ -600,10 +600,7 @@
   var MAX_POLLS_IN_FLIGHT = 1;
   var POLL_NOT_OK_DELAY_MS = 15e3;
   var POLL_FAILURE_BACKOFF_MS = [15e3, 3e4, 6e4];
-  var SAFETY_BRAKE_STEPS_MS = [2 * 6e4, 5 * 6e4, 15 * 6e4];
-  var SAFETY_BRAKE_RESET_MS = 30 * 6e4;
-  var MAX_SAFETY_BRAKE_MS = 60 * 6e4;
-  var DEFAULT_BUY_RATE_LIMIT_COOLDOWN_SECONDS = SAFETY_BRAKE_STEPS_MS[0] / 1e3;
+  var DEFAULT_BUY_RATE_LIMIT_COOLDOWN_SECONDS = 120;
   function pad(value) {
     return String(value).padStart(2, "0");
   }
@@ -817,11 +814,6 @@
           job.resolve(null);
         }
       },
-      // Ends a pause early (the seller verified with OTP on IndiaMART and pressed Resume Now).
-      resume() {
-        pausedUntil = 0;
-        pump();
-      },
       get running() {
         return running;
       },
@@ -855,31 +847,6 @@
     parts.push(`IndiaMART answered in ${duration(timing.answeredAt - timing.sentAt)}`);
     return parts.join(" \xB7 ");
   }
-  function isPollRateLimited(result) {
-    return isRateLimitStatus(result.status) || result.retryAfterSeconds !== null;
-  }
-  function nextSafetyBrake(previous, reason, retryAfterSeconds, now = Date.now()) {
-    const recent = previous && now - previous.tripped_at < SAFETY_BRAKE_RESET_MS;
-    const step = recent ? Math.min(previous.step + 1, SAFETY_BRAKE_STEPS_MS.length - 1) : 0;
-    const pauseMs = Math.min(Math.max(SAFETY_BRAKE_STEPS_MS[step], (retryAfterSeconds ?? 0) * 1e3), MAX_SAFETY_BRAKE_MS);
-    return { until: Math.max(previous?.until ?? 0, now + pauseMs), step, tripped_at: now, reason };
-  }
-  function safetyBrakeActive(brake, now = Date.now()) {
-    return Boolean(brake && brake.until > now);
-  }
-  var SAFETY_BRAKE_STORAGE_KEY = "imSafetyBrake";
-  // A pause this long (IndiaMART's 15-minute block) can be ended early by the seller, after verifying with OTP on
-  // IndiaMART. Shorter pauses always run out by themselves. Either way the bot carries on by itself when a pause ends.
-  var LONG_SAFETY_BRAKE_MS = 10 * 6e4;
-  var SAFETY_BRAKE_WARNING_CHECK_MESSAGE = "SAFETY_BRAKE_WARNING_CHECK";
-  var SAFETY_BRAKE_RESUME_MESSAGE = "SAFETY_BRAKE_RESUME";
-  function isLongSafetyBrake(brake, now = Date.now()) {
-    return safetyBrakeActive(brake, now) && brake.until - (brake.tripped_at ?? brake.until) >= LONG_SAFETY_BRAKE_MS;
-  }
-  // Ends the pause now. The step and the time it tripped stay, so another warning soon after still pauses for 15 minutes.
-  function sellerResumedBrake(brake, now = Date.now()) {
-    return { ...brake, until: now, resumed_at: now };
-  }
   function pollGapMsFrom(stored) {
     const seconds = stored?.poll_gap_seconds;
     const gapMs = typeof seconds === "number" && Number.isFinite(seconds) ? seconds * 1e3 : NaN;
@@ -893,11 +860,6 @@
   }
   function firstPollDelayMs(lastRequestAt, now = Date.now(), gapMs = POLL_GAP_MS) {
     return Math.max(0, lastRequestAt + gapMs - now);
-  }
-  function shouldReloadAfterBrake(brake, reloadedForTrippedAt, now = Date.now()) {
-    return Boolean(
-      brake && !safetyBrakeActive(brake, now) && now - brake.until < SAFETY_BRAKE_RESET_MS && brake.tripped_at !== reloadedForTrippedAt
-    );
   }
 
   // src/expired-interest.ts
@@ -1331,7 +1293,6 @@
     "selectedBusinessId",
     "billingEntitlement",
     "decisionConfig",
-    SAFETY_BRAKE_STORAGE_KEY,
     EXPIRED_INTEREST_ENABLED_KEY,
     EXPIRED_INTEREST_LOCK_KEY,
     EXPIRED_INTEREST_SENT_KEY,
@@ -1357,24 +1318,11 @@
     if (!config || String(config.business_id) !== businessId) {
       return "filter_config_not_loaded";
     }
-    if (safetyBrakeActive(values[SAFETY_BRAKE_STORAGE_KEY], now)) {
-      return "safety_brake";
-    }
     return null;
   }
   function lockFree(values, owner, now) {
     const lock = values[EXPIRED_INTEREST_LOCK_KEY];
     return !lock?.owner || lock.owner === owner || typeof lock.at !== "number" || now - lock.at >= EXPIRED_LOCK_STALE_MS;
-  }
-  async function tripBrake(deps, retryAfterSeconds) {
-    const stored = await deps.storageGet([SAFETY_BRAKE_STORAGE_KEY]);
-    const brake = nextSafetyBrake(
-      stored?.[SAFETY_BRAKE_STORAGE_KEY],
-      "interest_rate_limited",
-      retryAfterSeconds,
-      deps.now()
-    );
-    await deps.storageSet({ [SAFETY_BRAKE_STORAGE_KEY]: brake });
   }
   function keywordsOf(config, ruleIds) {
     const byId = new Map(config.keyword_rules.map((rule) => [String(rule.id), rule.keyword]));
@@ -1398,9 +1346,9 @@
     const config = values.decisionConfig;
     const list = await deps.bridgeRequest("IM_BL_EXPIRED_FETCH", {});
     if (list.status === 429) {
-      await tripBrake(deps, list.retryAfterSeconds);
-      await setStatus(deps, "safety_brake");
-      return idle("safety_brake");
+      // IndiaMART said "too many": only this scan stops. The next scan tries again, and nothing else pauses.
+      await setStatus(deps, "rate_limited");
+      return idle("rate_limited");
     }
     if (list.error === "not_logged_in") {
       await setStatus(deps, "not_logged_in_indiamart");
@@ -1459,25 +1407,20 @@
     for (const [index, { entry, mcatId, row }] of toMark.entries()) {
       if (index > 0) {
         await deps.sleep(MARK_GAP_MS);
-        const latest = await deps.storageGet([EXPIRED_INTEREST_ENABLED_KEY, SAFETY_BRAKE_STORAGE_KEY]);
+        const latest = await deps.storageGet([EXPIRED_INTEREST_ENABLED_KEY]);
         if (latest?.[EXPIRED_INTEREST_ENABLED_KEY] !== true) {
           await setStatus(deps, "stopped");
           return { state: "stopped", marked, counts };
-        }
-        if (safetyBrakeActive(latest?.[SAFETY_BRAKE_STORAGE_KEY], deps.now())) {
-          await setStatus(deps, "safety_brake");
-          return { state: "safety_brake", marked, counts };
         }
       }
       const result = await deps.bridgeRequest("IM_BL_MARK_SHORTLIST", buildMarkShortlistPayload("", { offerId: entry.offer_id, mcatId }));
       const outcome = parseMarkShortlistResult(result);
       const at = new Date(deps.now()).toISOString();
       if (outcome.kind === "rate_limited") {
-        await tripBrake(deps, outcome.retryAfterSeconds);
         stats = { ...stats, last_error: "IndiaMART rate-limited I am Interested" };
         await deps.storageSet({ [EXPIRED_INTEREST_STATS_KEY]: stats });
-        await setStatus(deps, "safety_brake");
-        return { state: "safety_brake", marked, counts };
+        await setStatus(deps, "rate_limited");
+        return { state: "rate_limited", marked, counts };
       }
       if (outcome.kind === "retry") {
         row.action = "retry";
@@ -1711,7 +1654,6 @@
   var INACTIVITY_POPUP_SELECTORS = [".Bl_admin_modal-content", ".sm_inn_pop_n"];
   var INACTIVITY_DIALOG_CANDIDATES = "[role='dialog'], [role='alertdialog'], .modal, [class*='modal' i], [class*='popup' i], [id*='popup' i], [class*='overlay' i]";
   var INACTIVITY_TEXT_PATTERN = /inactiv|session\s+(has\s+)?(expired|timed?\s*out)|are\s+you\s+still\s+(there|here)|you\s+(have\s+)?been\s+idle|idle\s+for|due\s+to\s+inactivity/i;
-  var safetyBrake = null;
   var buyQueue = createBuyQueue(BUY_CONCURRENCY);
   var parkedEnrichments = /* @__PURE__ */ new Map();
   var localDecisionsByClientEventId = /* @__PURE__ */ new Map();
@@ -1933,7 +1875,7 @@
   async function buyCapturedLead(marker, api, position, stored = Promise.resolve(true), receivedAt, firstSeenAt, queuedAt) {
     const startedAt = Date.now();
     const state = captureState ?? await readCaptureState();
-    if (!state || !isBotRunning(state) || !billingAllows(state) || enrichedLeadIds.has(marker.client_event_id) || brakeOn()) {
+    if (!state || !isBotRunning(state) || !billingAllows(state) || enrichedLeadIds.has(marker.client_event_id)) {
       return null;
     }
     const sentAt = Date.now();
@@ -1980,8 +1922,9 @@
     } else if (outcome.kind === "lost") {
       await recordEnrichmentAttempt(marker, `lost:${outcome.message} (${timing})`, Number.POSITIVE_INFINITY, true);
     } else if (outcome.kind === "rate_limited") {
-      const until = await tripSafetyBrake("buy_rate_limited", outcome.retryAfterSeconds);
-      await recordEnrichmentAttempt(marker, `rate_limited:${Math.round((until - Date.now()) / 1e3)}s`, until);
+      // Nothing pauses: only this lead waits, and is tried again after IndiaMART's Retry-After.
+      const retryAt = Date.now() + outcome.retryAfterSeconds * 1e3;
+      await recordEnrichmentAttempt(marker, `rate_limited:${Math.round(outcome.retryAfterSeconds)}s`, retryAt);
     } else {
       await recordEnrichmentAttempt(marker, `buy_failed:${outcome.message} (${timing})`, void 0, true);
     }
@@ -2011,7 +1954,7 @@
   }
   function autoEnrichCapturedLeadMarkers(markers, priority = "retry") {
     const now = Date.now();
-    if (brakeOn(now) || !canBuyInThisTab(now)) {
+    if (!canBuyInThisTab(now)) {
       return;
     }
     markers.filter((marker) => shouldAutoEnrichMarker(marker, now)).map((marker) => ({ marker, api: apiLeadForMarker(marker) })).filter((item) => item.api !== null).sort((first, second) => second.marker.synced_at.localeCompare(first.marker.synced_at)).forEach(({ marker, api }, index) => startBuy(marker, api, index + 1, priority));
@@ -2114,16 +2057,6 @@
         if (changes[LAST_LIST_REQUEST_STORAGE_KEY]) {
           lastListRequestAt = Math.max(lastListRequestAt, Number(changes[LAST_LIST_REQUEST_STORAGE_KEY].newValue) || 0);
         }
-        if (changes[SAFETY_BRAKE_STORAGE_KEY]) {
-          const wasOn = brakeOn();
-          safetyBrake = changes[SAFETY_BRAKE_STORAGE_KEY].newValue ?? null;
-          if (brakeOn()) {
-            buyQueue.pause(safetyBrake?.until ?? 0);
-          } else if (wasOn) {
-            // The pause ended early (Resume Now in another tab or the popup): list checks and buying carry on now.
-            continueAfterSafetyBrake();
-          }
-        }
         if (changes[MARKER_STORAGE_KEY]) {
           const businessId = captureState ? resolveSelectedBusinessId(captureState) : null;
           const markers = Object.values(changes[MARKER_STORAGE_KEY].newValue ?? {}).filter(
@@ -2173,7 +2106,6 @@
   var MAX_DECIDED_LEAD_KEYS = 2e3;
   var POLL_LOCK_STORAGE_KEY = "blPollLock";
   var LAST_LIST_REQUEST_STORAGE_KEY = "blLastListRequestAt";
-  var SAFETY_BRAKE_RELOAD_STORAGE_KEY = "safetyBrakeReloadedFor";
   var POLL_LOCK_STALE_MS = 45e3;
   var POLL_IDLE_DELAY_MS = 1e3;
   var BRIDGE_RESPONSE_TIMEOUT_MS = 3e4;
@@ -2182,8 +2114,6 @@
   var apiPollerStarted = false;
   var apiPollTimer;
   var apiPollFailures = 0;
-  var apiPollHttpErrors = 0;
-  var MAX_POLL_HTTP_ERRORS = 3;
   var apiPollDueAt;
   var apiPollsInFlight = 0;
   var lastApiPollEndedAt = 0;
@@ -2263,11 +2193,10 @@
   var pollLockWrittenAt = 0;
   var POLL_LOCK_REFRESH_MS = 5e3;
   function loadPollSharedState() {
-    pollSharedStateLoad ??= safeStorageGet([POLL_LOCK_STORAGE_KEY, SAFETY_BRAKE_STORAGE_KEY, LAST_LIST_REQUEST_STORAGE_KEY, POLL_SETTINGS_STORAGE_KEY]).then((state) => {
+    pollSharedStateLoad ??= safeStorageGet([POLL_LOCK_STORAGE_KEY, LAST_LIST_REQUEST_STORAGE_KEY, POLL_SETTINGS_STORAGE_KEY]).then((state) => {
       pollGapMs = pollGapMsFrom(state?.[POLL_SETTINGS_STORAGE_KEY]);
       pollLock = state?.[POLL_LOCK_STORAGE_KEY];
       lastListRequestAt = Math.max(lastListRequestAt, Number(state?.[LAST_LIST_REQUEST_STORAGE_KEY]) || 0);
-      safetyBrake = state?.[SAFETY_BRAKE_STORAGE_KEY] ?? safetyBrake;
     });
     return pollSharedStateLoad;
   }
@@ -2299,17 +2228,6 @@
   function notePageListRequest(status, retryAfterSeconds, payload) {
     const now = Date.now();
     noteListRequest(now);
-    const listed = Array.isArray(payload?.DisplayList);
-    const activityWarning = !listed && payload != null && looksLikeActivityWarning(JSON.stringify(payload).slice(0, 2e3));
-    if (isPollRateLimited({ status, retryAfterSeconds }) || activityWarning) {
-      void tripSafetyBrake("page_list_rate_limited", retryAfterSeconds).then((until) => {
-        if (apiPollerStarted && apiPollsInFlight === 0) {
-          lastApiPollPenalized = true;
-          scheduleApiPoll(Math.max(0, until - Date.now()));
-        }
-      });
-      return;
-    }
     const earliest = now + nextPollDelayMs(pollGapMs);
     if (apiPollDueAt !== void 0 && apiPollDueAt < earliest) {
       scheduleApiPoll(earliest - now);
@@ -2355,7 +2273,7 @@
     });
   }
   function pollSoon() {
-    if (!apiPollerStarted || lastApiPollPenalized || brakeOn()) {
+    if (!apiPollerStarted || lastApiPollPenalized) {
       return;
     }
     if (apiPollsInFlight > 0) {
@@ -2494,8 +2412,7 @@
       return null;
     }
   }
-  // The repeated resets (worker tick, timer, push message) run only while the bot is on and not in a safety pause,
-  // so IndiaMART's reconnect limit is never lifted after it has asked the bot to slow down. The page-load reset is unchanged.
+  // The repeated resets (worker tick, timer, push message) run only while the bot is on. The page-load reset is unchanged.
   var realtimeResetStateLoaded = false;
   function resetRealtimeThrottleWhileWatching(now = Date.now()) {
     if (!realtimeResetStateLoaded || !captureState) {
@@ -2504,7 +2421,7 @@
       }).catch(() => void 0);
       return false;
     }
-    if (!isBotRunning(captureState) || brakeOn(now)) {
+    if (!isBotRunning(captureState)) {
       return false;
     }
     return resetRealtimeThrottle(safeLocalStorage(), now);
@@ -2550,50 +2467,6 @@
     }
     return delayMs;
   }
-  function brakeOn(now = Date.now()) {
-    return safetyBrakeActive(safetyBrake, now);
-  }
-  async function tripSafetyBrake(reason, retryAfterSeconds, detail) {
-    const now = Date.now();
-    if (safetyBrake && brakeOn(now)) {
-      return safetyBrake.until;
-    }
-    safetyBrake = nextSafetyBrake(safetyBrake, reason, retryAfterSeconds, now);
-    buyQueue.pause(safetyBrake.until);
-    await safeStorageSet({
-      [SAFETY_BRAKE_STORAGE_KEY]: safetyBrake,
-      lastSafetyBrake: { ...safetyBrake, detail: detail ?? null, at: new Date(now).toISOString() }
-    });
-    return safetyBrake.until;
-  }
-  function continueAfterSafetyBrake() {
-    buyQueue.resume();
-    lastApiPollPenalized = false;
-    pollSoon();
-  }
-  // Resume Now: only for a long pause, and only once IndiaMART's warning is gone from this page (the seller verified
-  // with OTP). The pause record and its step are kept. If IndiaMART still blocks, the next request trips the brake again.
-  async function resumeSafetyBrakeBySeller(now = Date.now()) {
-    const stored = await safeStorageGet([SAFETY_BRAKE_STORAGE_KEY, "lastSafetyBrake"]) ?? {};
-    const brake = stored[SAFETY_BRAKE_STORAGE_KEY] ?? safetyBrake;
-    if (!safetyBrakeActive(brake, now)) {
-      return { ok: true, already_running: true };
-    }
-    if (!isLongSafetyBrake(brake, now)) {
-      return { ok: false, reason: "short_pause" };
-    }
-    if (findActivityWarningPopup()) {
-      return { ok: false, reason: "warning_visible" };
-    }
-    safetyBrake = sellerResumedBrake(brake, now);
-    const last = stored.lastSafetyBrake;
-    await safeStorageSet({
-      [SAFETY_BRAKE_STORAGE_KEY]: safetyBrake,
-      ...last && last.tripped_at === brake.tripped_at ? { lastSafetyBrake: { ...last, resumed_at: new Date(now).toISOString() } } : {}
-    });
-    continueAfterSafetyBrake();
-    return { ok: true };
-  }
   async function runApiPoll() {
     lastApiPollPenalized = false;
     storedMarkersLoad ??= loadStoredLeadDecisions().catch(() => void 0);
@@ -2604,10 +2477,6 @@
     }
     let { businessId, config } = context;
     await loadPollSharedState();
-    if (safetyBrake && brakeOn()) {
-      lastApiPollPenalized = true;
-      return pollIdle(`safety_brake_until_${new Date(safetyBrake.until).toISOString()}`, safetyBrake.until - Date.now());
-    }
     if (!holdPollLock()) {
       return pollIdle("another_tab_is_polling");
     }
@@ -2617,18 +2486,6 @@
     const result = await request;
     const receivedAt = Date.now();
     const listed = Array.isArray(result.json?.DisplayList);
-    const activityWarning = !listed && result.json != null && looksLikeActivityWarning(JSON.stringify(result.json).slice(0, 2e3));
-    if (isPollRateLimited(result) || activityWarning) {
-      lastApiPollPenalized = true;
-      const until = await tripSafetyBrake(activityWarning ? "list_activity_warning" : "list_rate_limited", result.retryAfterSeconds);
-      await recordPollStatus({
-        ok: false,
-        status: result.status,
-        retry_after: result.retryAfterSeconds,
-        error: `IndiaMART pushed back, polling and buying paused until ${new Date(until).toISOString()}`
-      });
-      return until - Date.now();
-    }
     if (result.status === 0) {
       lastApiPollPenalized = true;
       apiPollFailures += 1;
@@ -2639,18 +2496,6 @@
     const leads = result.ok ? parseBlDisplayData(result.json) : [];
     if (!result.ok || !listed) {
       lastApiPollPenalized = true;
-      apiPollHttpErrors = result.ok ? 0 : apiPollHttpErrors + 1;
-      if (apiPollHttpErrors >= MAX_POLL_HTTP_ERRORS) {
-        apiPollHttpErrors = 0;
-        const until = await tripSafetyBrake("list_http_errors", result.retryAfterSeconds);
-        await recordPollStatus({
-          ok: false,
-          status: result.status,
-          retry_after: result.retryAfterSeconds,
-          error: `IndiaMART pushed back, polling and buying paused until ${new Date(until).toISOString()}`
-        });
-        return until - Date.now();
-      }
       await recordPollStatus({
         ok: false,
         status: result.status,
@@ -2658,7 +2503,6 @@
       });
       return POLL_NOT_OK_DELAY_MS;
     }
-    apiPollHttpErrors = 0;
     noteSightings(leads, "poll", receivedAt);
     lastPollListAt = receivedAt;
     apiLeadIndex.add(leads);
@@ -2770,7 +2614,7 @@
     const stored = new Promise((resolve) => {
       settleStored = resolve;
     });
-    const buyNow = !brakeOn(now) && canBuyInThisTab(now);
+    const buyNow = canBuyInThisTab(now);
     const fresh = leads.filter((api) => !alreadyDecided(api)).sort((first, second) => (second.posted_at_ms ?? 0) - (first.posted_at_ms ?? 0));
     const recorded = [];
     let undecided = 0;
@@ -3001,26 +2845,9 @@
     ) ?? null;
   }
   async function checkForActivityWarning() {
-    const popup = findActivityWarningPopup();
-    if (!popup) {
-      return false;
-    }
-    const state = captureState ?? await readCaptureState();
-    if (!state || !isBotRunning(state)) {
-      return true;
-    }
-    await loadPollSharedState().catch(() => void 0);
-    if (brakeOn()) {
-      return true;
-    }
-    const reloadedFor = (await safeStorageGet([SAFETY_BRAKE_RELOAD_STORAGE_KEY]))?.[SAFETY_BRAKE_RELOAD_STORAGE_KEY];
-    if (safetyBrake && shouldReloadAfterBrake(safetyBrake, typeof reloadedFor === "number" ? reloadedFor : null)) {
-      await safeStorageSet({ [SAFETY_BRAKE_RELOAD_STORAGE_KEY]: safetyBrake.tripped_at });
-      await reloadBuyLeadPage("lastSafetyBrakeReload", popup);
-      return true;
-    }
-    await tripSafetyBrake("indiamart_activity_warning", null, normalizeTextValue(popup.innerText || popup.textContent).slice(0, 200));
-    return true;
+    // IndiaMART's high-activity notice is left alone and the bot keeps running. It is only noted, so the inactivity
+    // check never clicks a button on it.
+    return Boolean(findActivityWarningPopup());
   }
   function checkForInactivityPopup() {
     if (inactivityReloadStarted || extensionContextInvalidated) {
@@ -3246,18 +3073,7 @@
       startInactivityWatcher();
       startExpiredInterest();
     }
-    chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-      if (message?.type === SAFETY_BRAKE_WARNING_CHECK_MESSAGE) {
-        sendResponse({
-          warning: Boolean(findActivityWarningPopup()),
-          buy_leads_tab: window.top === window && isBuyLeadPath(window.location.pathname)
-        });
-        return;
-      }
-      if (message?.type === SAFETY_BRAKE_RESUME_MESSAGE) {
-        void resumeSafetyBrakeBySeller().then(sendResponse, () => sendResponse({ ok: false, reason: "error" }));
-        return true;
-      }
+    chrome.runtime.onMessage.addListener((message) => {
       if (message?.type === "BUSINESS_SELECTION_CHANGED") {
         resetLeadTracking();
         pollNow();

@@ -6256,33 +6256,9 @@ function skipReasonLabel(reason) {
 }
 
 // src/fast-buy.ts
-var SAFETY_BRAKE_STEPS_MS = [2 * 6e4, 5 * 6e4, 15 * 6e4];
-var SAFETY_BRAKE_RESET_MS = 30 * 6e4;
-var MAX_SAFETY_BRAKE_MS = 60 * 6e4;
-var DEFAULT_BUY_RATE_LIMIT_COOLDOWN_SECONDS = SAFETY_BRAKE_STEPS_MS[0] / 1e3;
 function plainMessage(value) {
   return value.replace(/<br\s*\/?>/gi, " ").replace(/<[^>]*>/g, "").replace(/&nbsp;/gi, " ").replace(/&amp;/gi, "&").replace(/&lt;/gi, "<").replace(/&gt;/gi, ">").replace(/\s+/g, " ").trim();
 }
-function safetyBrakeActive(brake, now = Date.now()) {
-  return Boolean(brake && brake.until > now);
-}
-var SAFETY_BRAKE_STORAGE_KEY = "imSafetyBrake";
-var SAFETY_BRAKE_REASON_TEXT = {
-  list_rate_limited: "IndiaMART rate-limited the lead list",
-  buy_rate_limited: "IndiaMART rate-limited a buy",
-  list_activity_warning: "IndiaMART reported high activity",
-  page_list_rate_limited: "IndiaMART rate-limited the page's lead list",
-  indiamart_activity_warning: "IndiaMART showed a high-activity warning"
-};
-function safetyBrakeNotice(brake, now = Date.now()) {
-  if (!brake || !safetyBrakeActive(brake, now)) {
-    return null;
-  }
-  const resumes = new Date(brake.until).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  const why = SAFETY_BRAKE_REASON_TEXT[brake.reason] ?? "IndiaMART pushed back";
-  return `Paused for account safety: ${why}. Polling and buying resume at ${resumes}.`;
-}
-
 // src/activity-log.ts
 function hasBuyerDetails(row) {
   return row.contact_state !== "NONE" && row.contact_state !== "FAILED";
@@ -6658,7 +6634,7 @@ var RUN_STATUS_TEXT = {
   not_signed_in: "Sign in to start",
   billing_not_confirmed: "Waiting for plan check",
   filter_config_not_loaded: "Keywords not loaded yet",
-  safety_brake: "Paused for account safety",
+  rate_limited: "IndiaMART said too many requests; trying again next scan",
   other_tab: "Running in another IndiaMART tab",
   not_logged_in_indiamart: "Log in to IndiaMART",
   list_failed: "Could not read expired leads; retrying"
@@ -7173,24 +7149,4 @@ chrome.runtime.onMessage.addListener((message) => {
 window.setInterval(() => void refresh(), PERIODIC_REFRESH_MS);
 window.setInterval(refreshTimeLabels, TIME_LABEL_REFRESH_MS);
 void refresh();
-var brakeNoticeTimer;
-function paintSafetyBrake(brake) {
-  const element = document.querySelector("#log-brake");
-  if (!element) {
-    return;
-  }
-  const notice = safetyBrakeNotice(brake);
-  element.hidden = !notice;
-  element.textContent = notice ?? "";
-  window.clearTimeout(brakeNoticeTimer);
-  if (notice && brake) {
-    brakeNoticeTimer = window.setTimeout(() => paintSafetyBrake(brake), Math.max(1e3, brake.until - Date.now() + 500));
-  }
-}
-void chrome.storage.local.get([SAFETY_BRAKE_STORAGE_KEY]).then((items) => paintSafetyBrake(items[SAFETY_BRAKE_STORAGE_KEY])).catch(() => void 0);
-chrome.storage.onChanged.addListener((changes, area) => {
-  if (area === "local" && changes[SAFETY_BRAKE_STORAGE_KEY]) {
-    paintSafetyBrake(changes[SAFETY_BRAKE_STORAGE_KEY].newValue);
-  }
-});
 initRankView();

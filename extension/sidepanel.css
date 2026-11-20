@@ -367,27 +367,6 @@ h1 {
   margin: 0;
 }
 
-.safety-brake,
-.log-brake {
-  background: #fff4e5;
-  border: 1px solid #f0b46b;
-  border-radius: 8px;
-  color: #8a4b00;
-  font-size: 12px;
-  line-height: 1.4;
-  margin: 8px 0 0;
-  padding: 6px 10px;
-}
-
-@media (prefers-color-scheme: dark) {
-  .safety-brake,
-  .log-brake {
-    background: #3a2a12;
-    border-color: #8a5a1c;
-    color: #f5c27a;
-  }
-}
-
 /* Activity views: Leads and Lead Rank (Beta) */
 .view-switch {
   background: var(--surface-2);

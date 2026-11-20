@@ -63,6 +63,7 @@ function makeTab({ config = baseConfig(), pollerStarted = true } = {}) {
     dispatchEvent: (event) => {
       const request = JSON.parse(event.detail);
       if (request.type === "IM_BL_FETCH") {
+        tab.answerListRaw = (result, json) => tab.listeners.forEach((listener) => listener({ detail: `${JSON.stringify({ requestId: request.requestId, result })}\n${JSON.stringify(json)}` }));
         tab.answerList = (rows) => tab.listeners.forEach((listener) => listener({ detail: `${JSON.stringify({ requestId: request.requestId, result: { ok: true, status: 200, retryAfterSeconds: null, durationMs: 5 } })}\n${JSON.stringify({ DisplayList: rows })}` }));
         return;
       }
@@ -104,7 +105,7 @@ test("throttle reset: the mechanism is still there, runs once on page load, and 
   assert.match(source, /var XMPP_MINUTE_LIMIT = 15;/);
 });
 
-test("throttle reset: the repeated reset never runs while the bot is off or in a safety pause", () => {
+test("throttle reset: the repeated reset never runs while the bot is off", () => {
   const { api, context } = loadContentScript();
   let saved = "";
   const fill = () => (saved = JSON.stringify({ a: { minuteCount: 15, minuteTimestamp: Date.now() - 1000 } }));
@@ -143,20 +144,13 @@ test("throttle reset: the repeated reset never runs while the bot is off or in a
   assert.equal(count(), 15, "not while the bot is off");
 
   api.setState("captureState", { botEnabled: true });
-  api.setState("safetyBrake", { until: Date.now() + 120000, step: 0, tripped_at: Date.now(), reason: "list_activity_warning" });
-  tick();
-  assert.equal(count(), 15, "not during a safety pause");
-  assert.equal(api.resetRealtimeThrottleWhileWatching(), false);
-
-  api.setState("safetyBrake", { until: Date.now() - 1000, step: 0, tripped_at: Date.now() - 121000, reason: "list_activity_warning" });
   timers[0].fn();
-  assert.equal(count(), 0, "the timer resets once the bot is on and the pause is over");
+  assert.equal(count(), 0, "the timer resets while the bot is on");
 
   fill();
   listeners[0]({ data: {} });
   assert.equal(count(), 0, "a push message resets too");
 
-  api.setState("safetyBrake", null);
   fill();
   assert.equal(api.resetRealtimeThrottleWhileWatching(), true);
 });
@@ -396,162 +390,58 @@ test("safety: pausing stops queued buys instead of sending them", async () => {
   assert.equal(await queue.enqueue(async () => "sent", "fresh"), "sent");
 });
 
-test("safety: 429, 403 and 503 all stop the bot", () => {
+test("no safety brake: nothing of the pause, Resume Now or the pause notice is left", () => {
+  for (const file of ["content-script.js", "page-network-hook.js", "service-worker.js", "popup.js", "popup.html", "popup.css", "sidepanel.js", "sidepanel.html", "sidepanel.css"]) {
+    assert.doesNotMatch(readBundle(file), /safety.?brake|imSafetyBrake|Resume Now|resume-bot/i, file);
+  }
+});
+
+test("no safety brake: a purchase answer still tells a rate limit apart, for the Reason column", () => {
   const { api } = loadContentScript();
   for (const status of [429, 403, 503]) {
-    assert.equal(api.isPollRateLimited({ status, retryAfterSeconds: null }), true, `poll ${status}`);
     assert.equal(api.parseBuyResult({ ok: false, status, retryAfterSeconds: null, json: null }).kind, "rate_limited", `buy ${status}`);
   }
-  assert.equal(api.isPollRateLimited({ status: 200, retryAfterSeconds: null }), false);
-  assert.equal(api.isPollRateLimited({ status: 500, retryAfterSeconds: null }), false);
-  assert.equal(api.isPollRateLimited({ status: 200, retryAfterSeconds: 30 }), true);
+  const warning = { ok: true, status: 200, retryAfterSeconds: null, json: { Status: "Failure", MESSAGE: "Unusual activity detected, temporarily blocked" } };
+  assert.equal(api.parseBuyResult(warning).kind, "rate_limited");
 });
 
-test("safety: IndiaMART's warning text is treated as a restriction", () => {
-  const { api } = loadContentScript();
-  const answer = { ok: true, status: 200, retryAfterSeconds: null, json: { Status: "Failure", MESSAGE: "Unusual activity detected, temporarily blocked" } };
-  assert.equal(api.parseBuyResult(answer).kind, "rate_limited");
-});
+// Runs one list check and answers it the way IndiaMART did.
+async function pollAnsweredWith(tab, result, json) {
+  const poll = tab.api.runApiPoll();
+  for (let turn = 0; turn < 50 && !tab.answerListRaw; turn += 1) await new Promise((resolve) => setImmediate(resolve));
+  tab.answerListRaw(result, json);
+  return poll;
+}
 
-test("safety: the pause grows with repeated pushback and honours Retry-After", () => {
-  const { api } = loadContentScript();
-  const now = 10_000_000;
-  const first = api.nextSafetyBrake(null, "x", null, now);
-  assert.equal(first.until - now, 120000);
-  const second = api.nextSafetyBrake(first, "x", null, now + 1000);
-  assert.equal(second.until - (now + 1000), 300000);
-  const third = api.nextSafetyBrake(second, "x", null, now + 2000);
-  assert.equal(third.until - (now + 2000), 900000);
-  assert.equal(api.nextSafetyBrake(null, "x", 1800, now).until - now, 1800000);
-});
-
-test("safety: nothing is bought while the brake is on, and the lead waits", async () => {
+test("no safety brake: a 429 on the lead list, even with a 15-minute Retry-After, does not pause the bot", async () => {
   const tab = makeTab();
-  tab.api.setState("safetyBrake", { until: Date.now() + 60000, step: 0, tripped_at: Date.now(), reason: "x" });
+  const delay = await pollAnsweredWith(tab, { ok: false, status: 429, retryAfterSeconds: 900, durationMs: 5 }, { error: "slow down" });
+  assert.equal(delay, 15000, "the next list check comes 15 s later, as after any bad answer");
+  assert.equal(tab.storage.imSafetyBrake, undefined, "no pause is stored");
+  assert.equal(tab.storage.lastApiPoll?.status, 429);
+  assert.equal(await tab.api.getState("buyQueue").enqueue(async () => "bought", "fresh"), "bought", "buying is not paused");
+});
+
+test("no safety brake: IndiaMART's high-activity text in the list answer does not pause the bot", async () => {
+  const tab = makeTab();
+  const delay = await pollAnsweredWith(tab, { ok: true, status: 200, retryAfterSeconds: null, durationMs: 5 }, { Status: "Failure", MESSAGE: "Unusual activity detected, temporarily blocked" });
+  assert.equal(delay, 15000);
+  assert.equal(tab.storage.imSafetyBrake, undefined);
+});
+
+test("no safety brake: a rate-limited purchase only makes that lead wait, and the next lead is still bought", async () => {
+  const tab = makeTab();
+  tab.buyAnswer = { ok: false, status: 429, retryAfterSeconds: null, durationMs: 5, json: null };
   tab.api.decidePolledLeads([tab.parse(imRow({ ETO_OFR_ID: "70012" }))], "biz", tab.config, "poll");
   await settle();
-  assert.equal(tab.buys.length, 0);
-  assert.equal(tab.recorded().length, 1, "recorded as pending, not dropped");
-  assert.equal(tab.recorded()[0].local_decision.decision, "captured");
-});
-
-const MINUTE = 60000;
-// IndiaMART's high-activity warning on the page, as the content script looks for it. Set after loading, so the
-// bundle does not boot itself.
-function showWarning(tab, text) {
-  tab.window.getComputedStyle = () => ({ visibility: "visible", display: "block", opacity: "1" });
-  tab.context.document = { querySelectorAll: () => (text ? [{ innerText: text, textContent: text, getClientRects: () => [{}] }] : []) };
-}
-const longBrake = (now = Date.now()) => ({ until: now + 15 * MINUTE, step: 2, tripped_at: now - 1000, reason: "list_activity_warning" });
-// A BuyLeads tab in the middle of a pause: the pause is stored, buying is paused, and the next list check waits.
-function pausedTab(brake) {
-  const tab = makeTab();
-  tab.storage.imSafetyBrake = brake;
-  tab.storage.lastSafetyBrake = { ...brake, detail: "IndiaMART reported high activity", at: new Date(brake.tripped_at).toISOString() };
-  tab.api.setState("safetyBrake", brake);
-  tab.api.getState("buyQueue").pause(brake.until);
-  tab.api.setState("lastApiPollPenalized", true);
-  showWarning(tab, null);
-  return tab;
-}
-// The fake page shortens every timer to 5 ms, so a list check that is due soon goes out within a few turns.
-async function listRequested(tab) {
-  for (let turn = 0; turn < 40 && !tab.answerList; turn += 1) await new Promise((resolve) => setTimeout(resolve, 3));
-  return typeof tab.answerList === "function";
-}
-const tryToBuy = (tab) => tab.api.getState("buyQueue").enqueue(async () => "bought", "fresh");
-
-test("resume now: only a long pause (IndiaMART's 15-minute block) can be ended early", () => {
-  const { api } = loadContentScript();
-  const now = 1_000_000;
-  const brake = (minutes) => ({ until: now + minutes * MINUTE, step: 0, tripped_at: now, reason: "x" });
-  assert.equal(api.isLongSafetyBrake(brake(15), now), true);
-  assert.equal(api.isLongSafetyBrake(brake(10), now), true, "a 10-minute Retry-After counts");
-  assert.equal(api.isLongSafetyBrake(brake(5), now), false);
-  assert.equal(api.isLongSafetyBrake(brake(2), now), false);
-  assert.equal(api.isLongSafetyBrake(brake(15), now + 16 * MINUTE), false, "a pause that has ended");
-  assert.equal(api.isLongSafetyBrake(null, now), false);
-  const third = api.nextSafetyBrake(api.nextSafetyBrake(api.nextSafetyBrake(null, "x", null, now), "x", null, now + 1000), "x", null, now + 2000);
-  assert.equal(api.isLongSafetyBrake(third, now + 2000), true, "the third warning's 15-minute pause");
-});
-
-test("resume now: after OTP the bot buys and checks the list at once, and keeps the pause record and step", async () => {
-  const brake = longBrake();
-  const tab = pausedTab(brake);
-  assert.equal(await tryToBuy(tab), null, "paused before");
-  assert.deepEqual(plain(await tab.api.resumeSafetyBrakeBySeller()), { ok: true });
-  const stored = tab.storage.imSafetyBrake;
-  assert.ok(stored.until <= Date.now(), "the pause has ended");
-  assert.equal(stored.step, 2);
-  assert.equal(stored.tripped_at, brake.tripped_at);
-  assert.equal(stored.reason, brake.reason);
-  assert.equal(typeof stored.resumed_at, "number");
-  assert.equal(tab.storage.lastSafetyBrake.detail, "IndiaMART reported high activity", "why it paused is kept");
-  assert.equal(typeof tab.storage.lastSafetyBrake.resumed_at, "string");
-  assert.equal(await tryToBuy(tab), "bought", "buying runs straight away");
-  assert.ok(await listRequested(tab), "the list is checked straight away, not at the end of the old pause");
-});
-
-test("resume now: refused while IndiaMART's warning is still showing, and a short pause is never ended early", async () => {
-  const brake = longBrake();
-  const tab = pausedTab(brake);
-  showWarning(tab, "We have noticed high activity on your account. Please verify with OTP to continue.");
-  assert.deepEqual(plain(await tab.api.resumeSafetyBrakeBySeller()), { ok: false, reason: "warning_visible" });
-  assert.equal(tab.storage.imSafetyBrake.until, brake.until, "the pause is unchanged");
-  assert.equal(await tryToBuy(tab), null);
-
-  const short = { until: Date.now() + 5 * MINUTE, step: 1, tripped_at: Date.now(), reason: "list_rate_limited" };
-  const shortTab = pausedTab(short);
-  assert.deepEqual(plain(await shortTab.api.resumeSafetyBrakeBySeller()), { ok: false, reason: "short_pause" });
-  assert.equal(shortTab.storage.imSafetyBrake.until, short.until);
-  assert.equal(await tryToBuy(shortTab), null);
-});
-
-test("resume now: another warning soon after a resume still pauses for 15 minutes", () => {
-  const { api } = loadContentScript();
-  const now = 1_000_000;
-  const brake = { until: now + 15 * MINUTE, step: 2, tripped_at: now, reason: "list_activity_warning" };
-  const resumed = api.sellerResumedBrake(brake, now + MINUTE);
-  assert.equal(resumed.until, now + MINUTE);
-  assert.equal(resumed.step, 2);
-  assert.equal(resumed.tripped_at, now);
-  const again = api.nextSafetyBrake(resumed, "list_activity_warning", null, now + 3 * MINUTE);
-  assert.equal(again.step, 2);
-  assert.equal(again.until - (now + 3 * MINUTE), 15 * MINUTE);
-  // Deleting the stored pause, as 1.0.20's button did, would have dropped the next pause to 2 minutes.
-  assert.equal(api.nextSafetyBrake(null, "list_activity_warning", null, now + 3 * MINUTE).until - (now + 3 * MINUTE), 2 * MINUTE);
-});
-
-test("resume now: a resume from the popup or another tab starts this tab too", async () => {
-  const brake = longBrake();
-  const tab = pausedTab(brake);
-  tab.api.startCaptureStateSync();
-  // What chrome.storage does when another tab saves the ended pause: the value changes, then every tab is told.
-  tab.storage.imSafetyBrake = { ...brake, until: Date.now(), resumed_at: Date.now() };
-  tab.storageChanged({ imSafetyBrake: tab.storage.imSafetyBrake });
-  assert.equal(await tryToBuy(tab), "bought");
-  assert.ok(await listRequested(tab));
-});
-
-test("no resume: a long pause nobody ends runs out by itself, and the bot carries on", async () => {
-  const now = Date.now();
-  const brake = { until: now + 60, step: 2, tripped_at: now + 60 - 15 * MINUTE, reason: "list_activity_warning" };
-  const tab = pausedTab(brake);
-  assert.equal(await tryToBuy(tab), null, "paused");
-  await new Promise((resolve) => setTimeout(resolve, 100));
-  assert.equal(await tryToBuy(tab), "bought", "buying carries on when the pause runs out");
-  const poll = tab.api.runApiPoll();
-  assert.ok(await listRequested(tab), "the list check carries on");
-  tab.answerList([]);
-  await poll;
-  assert.equal(tab.storage.imSafetyBrake.until, brake.until, "nobody had to press anything");
-});
-
-test("resume now: the popup never deletes the pause record, and offers Resume Now only in a long pause", () => {
-  const popup = readBundle("popup.js");
-  assert.doesNotMatch(popup, /storage\.local\.remove\([^)]*(SAFETY_BRAKE_STORAGE_KEY|imSafetyBrake|lastSafetyBrake)/);
-  assert.match(popup, /resumeRow\.hidden = !isLongSafetyBrake\(brake\)/);
-  assert.match(readBundle("popup.html"), /<div id="resume-row" hidden>/);
+  const limited = tab.sent.find((message) => message.type === "INDIAMART_LEAD_ENRICHMENT_FAILED");
+  assert.match(limited.error, /^rate_limited:120s$/);
+  assert.notEqual(limited.final, true, "that lead is tried again later");
+  tab.buyAnswer = null;
+  tab.api.decidePolledLeads([tab.parse(imRow({ ETO_OFR_ID: "70013" }))], "biz", tab.config, "poll");
+  await settle();
+  assert.deepEqual(tab.buys.map((buy) => String(buy.ofrid)), ["70012", "70013"], "the next lead was bought straight away");
+  assert.equal(tab.storage.imSafetyBrake, undefined);
 });
 
 test("safety: request limits and polling speed are unchanged", () => {

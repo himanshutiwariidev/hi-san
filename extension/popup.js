@@ -82,38 +82,6 @@ var SKIP_REASON_LABELS = {
 };
 var BUSINESS_SKIP_REASON_OPTIONS = Object.entries(SKIP_REASON_LABELS).filter(([reason]) => reason !== "indiamart_not_retrieved");
 
-// src/fast-buy.ts
-var SAFETY_BRAKE_STEPS_MS = [2 * 6e4, 5 * 6e4, 15 * 6e4];
-var SAFETY_BRAKE_RESET_MS = 30 * 6e4;
-var MAX_SAFETY_BRAKE_MS = 60 * 6e4;
-var DEFAULT_BUY_RATE_LIMIT_COOLDOWN_SECONDS = SAFETY_BRAKE_STEPS_MS[0] / 1e3;
-function safetyBrakeActive(brake, now = Date.now()) {
-  return Boolean(brake && brake.until > now);
-}
-var SAFETY_BRAKE_STORAGE_KEY = "imSafetyBrake";
-// Same rule as the content script: only a pause of 10 minutes or more (IndiaMART's 15-minute block) can be ended early.
-var LONG_SAFETY_BRAKE_MS = 10 * 6e4;
-var SAFETY_BRAKE_WARNING_CHECK_MESSAGE = "SAFETY_BRAKE_WARNING_CHECK";
-var SAFETY_BRAKE_RESUME_MESSAGE = "SAFETY_BRAKE_RESUME";
-function isLongSafetyBrake(brake, now = Date.now()) {
-  return safetyBrakeActive(brake, now) && brake.until - (brake.tripped_at ?? brake.until) >= LONG_SAFETY_BRAKE_MS;
-}
-var SAFETY_BRAKE_REASON_TEXT = {
-  list_rate_limited: "IndiaMART rate-limited the lead list",
-  buy_rate_limited: "IndiaMART rate-limited a buy",
-  list_activity_warning: "IndiaMART reported high activity",
-  page_list_rate_limited: "IndiaMART rate-limited the page's lead list",
-  indiamart_activity_warning: "IndiaMART showed a high-activity warning"
-};
-function safetyBrakeNotice(brake, now = Date.now()) {
-  if (!brake || !safetyBrakeActive(brake, now)) {
-    return null;
-  }
-  const resumes = new Date(brake.until).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  const why = SAFETY_BRAKE_REASON_TEXT[brake.reason] ?? "IndiaMART pushed back";
-  return `Paused for account safety: ${why}. Polling and buying resume at ${resumes}.`;
-}
-
 // src/activity-log.ts
 function relativeTime(iso, now = Date.now()) {
   const seconds = Math.max(0, Math.round((now - Date.parse(iso)) / 1e3));
@@ -164,7 +132,7 @@ var RUN_STATUS_TEXT = {
   not_signed_in: "Sign in to start",
   billing_not_confirmed: "Waiting for plan check",
   filter_config_not_loaded: "Keywords not loaded yet",
-  safety_brake: "Paused for account safety",
+  rate_limited: "IndiaMART said too many requests; trying again next scan",
   other_tab: "Running in another IndiaMART tab",
   not_logged_in_indiamart: "Log in to IndiaMART",
   list_failed: "Could not read expired leads; retrying"
@@ -305,7 +273,7 @@ var POLL_FRESH_MS = 15e4;
 function pollStillRunning(poll) {
   if (poll.ok) return true;
   const idle = poll.idle ?? "";
-  return idle === "another_tab_is_polling" || idle === "filter_config_stale" || idle.startsWith("safety_brake") || (poll.error ?? "").startsWith("IndiaMART pushed back");
+  return idle === "another_tab_is_polling" || idle === "filter_config_stale";
 }
 function localBotState(botEnabled, poll, now = Date.now()) {
   if (!botEnabled) return "idle";
@@ -1038,85 +1006,5 @@ chrome.storage.onChanged.addListener(async (changes) => {
   const state = await readLocalState();
   if (state.authSession && state.selectedBusinessId) {
     await refreshTodayCountsInBackground(state.authSession, state.selectedBusinessId);
-  }
-});
-var brakeNoticeTimer;
-var resumeBusy = false;
-var RESUME_LABEL = "▶ Resume Now";
-var RESUME_NOTES = {
-  warning_visible: "IndiaMART still shows its high-activity warning. Verify with OTP on IndiaMART first, then press Resume Now.",
-  no_tab: "Open the IndiaMART BuyLeads page (or reload it), then press Resume Now.",
-  short_pause: "This short pause ends by itself in a few minutes.",
-  error: "Could not resume now. The bot carries on by itself when the pause ends."
-};
-function paintSafetyBrake(brake) {
-  const wrapper = document.querySelector("#safety-brake");
-  if (!wrapper) {
-    return;
-  }
-  const notice = safetyBrakeNotice(brake);
-  wrapper.hidden = !notice;
-  const textEl = document.querySelector("#safety-brake-text");
-  if (textEl) textEl.textContent = notice ?? "";
-  // Resume Now is offered only in a long pause. Short pauses, and long ones nobody resumes, end by themselves.
-  const resumeRow = document.querySelector("#resume-row");
-  if (resumeRow) resumeRow.hidden = !isLongSafetyBrake(brake);
-  const button = document.querySelector("#resume-bot");
-  if (button && !resumeBusy) {
-    button.disabled = false;
-    button.textContent = RESUME_LABEL;
-  }
-  const note = document.querySelector("#resume-note");
-  if (note && !notice) note.hidden = true;
-  window.clearTimeout(brakeNoticeTimer);
-  if (notice && brake) {
-    brakeNoticeTimer = window.setTimeout(() => paintSafetyBrake(brake), Math.max(1e3, brake.until - Date.now() + 500));
-  }
-}
-function askIndiaMartTab(tabId, message, waitMs = 3e3) {
-  return Promise.race([
-    chrome.tabs.sendMessage(tabId, message).catch(() => null),
-    new Promise((resolve) => window.setTimeout(() => resolve(null), waitMs))
-  ]);
-}
-// Every open IndiaMART page is asked whether IndiaMART's warning is still showing. Only when none shows it does the
-// BuyLeads tab end the pause, keeping its record and step.
-async function resumeAfterSellerVerified() {
-  const tabs = await chrome.tabs.query({ url: "https://*.indiamart.com/*" }).catch(() => []);
-  const answers = await Promise.all(tabs.map((tab) => askIndiaMartTab(tab.id, { type: SAFETY_BRAKE_WARNING_CHECK_MESSAGE })));
-  if (answers.some((answer) => answer?.warning)) {
-    return { ok: false, reason: "warning_visible" };
-  }
-  const buyLeadsTab = tabs.find((_tab, index) => answers[index]?.buy_leads_tab);
-  if (!buyLeadsTab) {
-    return { ok: false, reason: "no_tab" };
-  }
-  return await askIndiaMartTab(buyLeadsTab.id, { type: SAFETY_BRAKE_RESUME_MESSAGE }, 1e4) ?? { ok: false, reason: "no_tab" };
-}
-document.querySelector("#resume-bot")?.addEventListener("click", async () => {
-  const button = document.querySelector("#resume-bot");
-  const note = document.querySelector("#resume-note");
-  resumeBusy = true;
-  if (button) {
-    button.disabled = true;
-    button.textContent = "Checking IndiaMART...";
-  }
-  if (note) note.hidden = true;
-  const result = await resumeAfterSellerVerified().catch(() => ({ ok: false, reason: "error" }));
-  resumeBusy = false;
-  if (button) {
-    button.disabled = false;
-    button.textContent = RESUME_LABEL;
-  }
-  // On success the stored pause ends, and the storage listener below hides the notice.
-  if (!result?.ok && note) {
-    note.textContent = RESUME_NOTES[result?.reason] ?? RESUME_NOTES.error;
-    note.hidden = false;
-  }
-});
-void chrome.storage.local.get([SAFETY_BRAKE_STORAGE_KEY]).then((items) => paintSafetyBrake(items[SAFETY_BRAKE_STORAGE_KEY])).catch(() => void 0);
-chrome.storage.onChanged.addListener((changes, area) => {
-  if (area === "local" && changes[SAFETY_BRAKE_STORAGE_KEY]) {
-    paintSafetyBrake(changes[SAFETY_BRAKE_STORAGE_KEY].newValue);
   }
 });

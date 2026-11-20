@@ -935,64 +935,6 @@ select:disabled {
   color: var(--text);
 }
 
-.safety-brake,
-.log-brake {
-  background: #fff4e5;
-  border: 1px solid #f0b46b;
-  border-radius: 8px;
-  color: #8a4b00;
-  font-size: 12px;
-  line-height: 1.4;
-  margin: 8px 0 0;
-  padding: 6px 10px;
-}
-
-.safety-brake p {
-  margin: 0 0 6px;
-}
-
-.resume-btn {
-  background: #e07b00;
-  border: none;
-  border-radius: 6px;
-  color: #fff;
-  cursor: pointer;
-  font-size: 11px;
-  font-weight: 600;
-  padding: 4px 10px;
-}
-
-.resume-btn:hover {
-  background: #c06500;
-}
-
-.resume-btn:disabled {
-  background: #c09060;
-  cursor: not-allowed;
-}
-
-.safety-brake .resume-note {
-  font-weight: 600;
-  margin: 6px 0 0;
-}
-
-@media (prefers-color-scheme: dark) {
-  .safety-brake,
-  .log-brake {
-    background: #3a2a12;
-    border-color: #8a5a1c;
-    color: #f5c27a;
-  }
-
-  .resume-btn {
-    background: #c06500;
-  }
-
-  .resume-btn:hover {
-    background: #e07b00;
-  }
-}
-
 /* Lead Rank tab: expired-lead interest */
 .rank-head {
   align-items: flex-start;

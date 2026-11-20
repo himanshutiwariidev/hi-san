@@ -307,33 +307,11 @@ try {
   const perMinute = im.state.lists.filter((entry) => entry.at > Date.now() - 60000).length;
   check("the poll rate is unchanged", Math.min(...gaps.slice(1)) >= 6500 && perMinute <= 9, `min gap ${Math.min(...gaps.slice(1))} ms, ${perMinute} in the last minute`);
 
-  im.state.listStatus = 429;
-  const before = im.state.lists.length;
-  const brake = await until(async () => {
-    const stored = await sw.evaluate(`chrome.storage.local.get("imSafetyBrake").then((state) => state.imSafetyBrake ?? null)`);
-    return stored?.until > Date.now() ? stored : null;
-  }, 15000, "safety brake");
-  check("12. a 429 trips the safety brake", Boolean(brake), brake ? `${Math.round((brake.until - Date.now()) / 1000)} s pause` : "");
-  const atBrake = im.state.lists.length;
-  im.state.rows.push(row(1011));
-  await sleep(20000);
-  check("no list request is sent during the pause", im.state.lists.length === atBrake, `${atBrake - before} before, ${im.state.lists.length - atBrake} after`);
-  check("nothing is bought during the pause", !im.state.buys.some((buy) => buy.ofrid === "1011"));
-
-  im.state.listStatus = 200;
-  const resumed = await until(reached(1011, "retrieved"), 125000, "lead 1011 after the pause");
-  const firstAfter = im.state.lists[atBrake]?.at;
-  check("the bot resumes by itself, and not before the pause ends", Boolean(resumed) && firstAfter >= brake.until, `resumed ${Math.round((firstAfter - brake.until) / 1000)} s after the pause ended`);
-
-  // Resume Now: IndiaMART blocks for 15 minutes, the seller verifies with OTP on IndiaMART, then presses Resume Now.
-  const pausedBrake = () => sw.evaluate(`chrome.storage.local.get("imSafetyBrake").then((state) => state.imSafetyBrake ?? null)`);
+  // No safety brake: IndiaMART answers "too many" with a 15-minute Retry-After and shows its high-activity notice,
+  // and the bot keeps going at its normal limits instead of pausing.
+  const storedPause = () => sw.evaluate(`chrome.storage.local.get(["imSafetyBrake", "lastSafetyBrake"]).then((state) => state.imSafetyBrake ?? state.lastSafetyBrake ?? null)`);
   im.state.listStatus = 429;
   im.state.retryAfter = 900;
-  const longPause = await until(async () => {
-    const stored = await pausedBrake();
-    return stored?.until - Date.now() > 10 * 60000 ? stored : null;
-  }, 20000, "a 15-minute pause");
-  check("IndiaMART's 15-minute block pauses the bot for 15 minutes", Boolean(longPause), longPause ? `${Math.round((longPause.until - Date.now()) / 60000)} min pause` : "");
   await page.evaluate(`(() => {
     const box = document.createElement("div");
     box.id = "im-warning";
@@ -342,55 +320,29 @@ try {
     document.body.append(box);
     return true;
   })()`);
+  const refusedFrom = im.state.lists.length;
+  const refusedAt = Date.now();
+  await until(async () => im.state.lists.length >= refusedFrom + 3, 60000, "three list checks while IndiaMART says too many");
+  const refused = im.state.lists.slice(refusedFrom);
+  const refusedGaps = refused.slice(1).map((entry, index) => entry.at - refused[index].at);
+  check("a 429 with a 15-minute Retry-After does not stop the bot", refused.length >= 3 && Math.max(...refusedGaps) < 20000, `${refused.length} list checks in ${Math.round((Date.now() - refusedAt) / 1000)} s, gaps ${refusedGaps.map((gap) => Math.round(gap / 1000)).join(", ")} s`);
+  check("it does not hammer IndiaMART either", Math.min(...refusedGaps) >= 6500, `smallest gap ${Math.round(Math.min(...refusedGaps) / 1000)} s`);
+  check("nothing is paused or recorded as a pause", (await storedPause()) === null);
 
-  // The popup in its own window, so the IndiaMART tab stays in front of its window, as when the seller clicks the icon.
-  const browserSession = await devtools((await fetch(`http://127.0.0.1:${DEBUG_PORT}/json/version`).then((response) => response.json())).webSocketDebuggerUrl);
-  const created = await browserSession.send("Target.createTarget", { url: `chrome-extension://${extensionId}/popup.html`, newWindow: true });
-  const popupTarget = await until(async () => (await debugList()).find((target) => target.id === created.result?.targetId), 10000, "popup window");
-  const popup = await devtools(popupTarget.webSocketDebuggerUrl);
-  const offered = await until(() => popup.evaluate(`(() => {
-    const notice = document.querySelector("#safety-brake");
-    const row = document.querySelector("#resume-row");
-    return Boolean(notice && row && !notice.hidden && !row.hidden);
-  })()`), 15000, "Resume Now in the popup");
-  check("the popup offers Resume Now during the 15-minute pause", Boolean(offered));
-
-  const noteText = () => popup.evaluate(`(() => { const note = document.querySelector("#resume-note"); return note && !note.hidden ? note.textContent : null; })()`);
-  await popup.evaluate(`document.querySelector("#resume-bot").click()`);
-  const refused = await until(noteText, 15000, "the refusal note");
-  const stillPaused = (await pausedBrake())?.until > Date.now();
-  check("Resume Now is refused while IndiaMART still shows its warning", /Verify with OTP/.test(refused ?? "") && stillPaused, refused ?? "no note");
-
-  // The seller verifies with OTP: IndiaMART's warning goes away and IndiaMART answers normally again.
-  await page.evaluate(`(document.getElementById("im-warning")?.remove(), true)`);
   im.state.listStatus = 200;
   im.state.retryAfter = null;
-  im.state.rows.push(row(1013));
-  const listsAtPress = im.state.lists.length;
-  const pressedAt = Date.now();
-  await popup.evaluate(`document.querySelector("#resume-bot").click()`);
-  const afterOtp = await until(reached(1013, "retrieved"), 30000, "lead 1013 after Resume Now");
-  const firstListAfterPress = im.state.lists[listsAtPress]?.at;
-  check(
-    "after OTP, Resume Now starts list checks and buying at once",
-    Boolean(afterOtp) && firstListAfterPress - pressedAt < 10000,
-    `list checked ${((firstListAfterPress - pressedAt) / 1000).toFixed(1)} s after the press, ${Math.round((longPause.until - Date.now()) / 60000)} min before the pause would have ended`
-  );
-  const record = await sw.evaluate(`chrome.storage.local.get(["imSafetyBrake", "lastSafetyBrake"])`);
-  check(
-    "the pause record and its step are kept",
-    record.imSafetyBrake?.step === longPause.step && record.imSafetyBrake?.tripped_at === longPause.tripped_at && Boolean(record.imSafetyBrake?.resumed_at) && Boolean(record.lastSafetyBrake?.resumed_at),
-    `step ${record.imSafetyBrake?.step}, reason ${record.lastSafetyBrake?.reason}`
-  );
-  const noticeGone = await until(() => popup.evaluate(`document.querySelector("#safety-brake").hidden`), 5000, "the pause notice to go");
-  check("the pause notice goes away after the resume", Boolean(noticeGone));
-  popup.close();
-  browserSession.close();
+  im.state.rows.push(row(1011));
+  const backAt = Date.now();
+  const resumed = await until(reached(1011, "retrieved"), 30000, "lead 1011 once IndiaMART answers again");
+  check("as soon as IndiaMART answers again, leads are bought, with its warning still on the page", Boolean(resumed) && (await page.evaluate(`Boolean(document.getElementById("im-warning"))`)), `${Math.round((Date.now() - backAt) / 1000)} s`);
+  const lastMinute = im.state.lists.filter((entry) => entry.at > Date.now() - 60000).length;
+  check("the list check rate stays within its limit", lastMinute <= 9, `${lastMinute} in the last minute`);
+  await page.evaluate(`(document.getElementById("im-warning")?.remove(), true)`);
 
   const all = await leads();
   const by = (status) => all.filter((lead) => lead.status === status).length;
   check("10. the totals add up", all.length === by("retrieved") + by("filtered") + by("not_retrieved") + by("pending"), `${all.length} = ${by("retrieved")} + ${by("filtered")} + ${by("not_retrieved")} + ${by("pending")}`);
-  check("every detected lead is accounted for", [1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012, 1013].every((id) => all.some((lead) => lead.client_event_id.endsWith(`im-ofr:${id}`))));
+  check("every detected lead is accounted for", [1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012].every((id) => all.some((lead) => lead.client_event_id.endsWith(`im-ofr:${id}`))));
 
   const audit = await sw.evaluate(fs.readFileSync(path.join(ROOT, "tools/audit-saved-contacts.js"), "utf8"));
   const expectedPurchases = im.state.buys.filter((buy) => !im.state.lostIds.has(buy.ofrid)).length + 1;

@@ -6272,7 +6272,7 @@ var POLL_FRESH_MS = 15e4;
 function pollStillRunning(poll) {
   if (poll.ok) return true;
   const idle = poll.idle ?? "";
-  return idle === "another_tab_is_polling" || idle === "filter_config_stale" || idle.startsWith("safety_brake") || (poll.error ?? "").startsWith("IndiaMART pushed back");
+  return idle === "another_tab_is_polling" || idle === "filter_config_stale";
 }
 function localBotState(botEnabled, poll, now = Date.now()) {
   if (!botEnabled) return "idle";

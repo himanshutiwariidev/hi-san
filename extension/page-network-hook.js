@@ -36,10 +36,6 @@ ${body}`;
     }
   }
   var POLL_PAGE_SIZE = 50;
-  var SAFETY_BRAKE_STEPS_MS = [2 * 6e4, 5 * 6e4, 15 * 6e4];
-  var SAFETY_BRAKE_RESET_MS = 30 * 6e4;
-  var MAX_SAFETY_BRAKE_MS = 60 * 6e4;
-  var DEFAULT_BUY_RATE_LIMIT_COOLDOWN_SECONDS = SAFETY_BRAKE_STEPS_MS[0] / 1e3;
   function buildDisplayRequest(glid, template = null) {
     return {
       LocPref: "1",
