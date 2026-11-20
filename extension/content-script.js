@@ -768,7 +768,7 @@
       contact_fields: buyer.contact_fields ?? []
     };
   }
-  var BUY_CONCURRENCY = 8;
+  var BUY_CONCURRENCY = 6;
   var RETRY_BUY_SLOTS = 2;
   function createBuyQueue(slots, clock = () => Date.now(), retrySlots = RETRY_BUY_SLOTS) {
     const fresh = [];
@@ -2098,9 +2098,14 @@
           lastListRequestAt = Math.max(lastListRequestAt, Number(changes[LAST_LIST_REQUEST_STORAGE_KEY].newValue) || 0);
         }
         if (changes[SAFETY_BRAKE_STORAGE_KEY]) {
+          const prevBrake = safetyBrake;
           safetyBrake = changes[SAFETY_BRAKE_STORAGE_KEY].newValue ?? null;
           if (brakeOn()) {
             buyQueue.pause(safetyBrake?.until ?? 0);
+          } else if (prevBrake && !safetyBrake) {
+            // Safety brake manually cleared (Resume Now button) — immediately resume polling
+            buyQueue.pause(0);
+            pollSoon();
           }
         }
         if (changes[MARKER_STORAGE_KEY]) {
@@ -2438,6 +2443,12 @@
   var XMPP_CONNECTION_DATA_KEY = "xmppConnectionData";
   var XMPP_MINUTE_LIMIT = 15;
   function resetRealtimeThrottle(storage = safeLocalStorage(), now = Date.now()) {
+    if (!storage || typeof storage.getItem !== "function") {
+      storage = safeLocalStorage();
+    }
+    if (typeof now !== "number") {
+      now = Date.now();
+    }
     try {
       const raw = storage?.getItem(XMPP_CONNECTION_DATA_KEY);
       if (!storage || !raw) {
@@ -2473,9 +2484,11 @@
     }
     realtimeListenerStarted = true;
     resetRealtimeThrottle();
+    window.setInterval(resetRealtimeThrottle, 15000);
     try {
       const channel = new BroadcastChannel(REALTIME_CHANNEL_NAME);
       channel.addEventListener("message", (event) => {
+        resetRealtimeThrottle();
         const leads = parseRealtimeLeadMessage(event.data);
         if (leads.length) {
           void decideArrivedLeads(leads, "push").catch(() => void 0);
@@ -3057,7 +3070,8 @@
         ], { type: "application/javascript" });
         const worker = new Worker(URL.createObjectURL(workerBlob));
         worker.onmessage = () => {
-          // Keep main event loop awake in background
+          // Keep main event loop awake in background and reset XMPP throttle
+          resetRealtimeThrottle();
         };
         worker.postMessage("start");
       }

@@ -947,12 +947,44 @@ select:disabled {
   padding: 6px 10px;
 }
 
+.safety-brake p {
+  margin: 0 0 6px;
+}
+
+.resume-btn {
+  background: #e07b00;
+  border: none;
+  border-radius: 6px;
+  color: #fff;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 10px;
+}
+
+.resume-btn:hover {
+  background: #c06500;
+}
+
+.resume-btn:disabled {
+  background: #c09060;
+  cursor: not-allowed;
+}
+
 @media (prefers-color-scheme: dark) {
   .safety-brake,
   .log-brake {
     background: #3a2a12;
     border-color: #8a5a1c;
     color: #f5c27a;
+  }
+
+  .resume-btn {
+    background: #c06500;
+  }
+
+  .resume-btn:hover {
+    background: #e07b00;
   }
 }
 

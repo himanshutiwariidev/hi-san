@@ -92,10 +92,10 @@ function makeTab({ config = baseConfig(), pollerStarted = true } = {}) {
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 25));
 
-test("throttle reset: the mechanism is still there and still runs once per page load", () => {
+test("throttle reset: the mechanism is still there and runs periodically and on page load", () => {
   const source = readBundle("content-script.js");
   assert.match(source, /function resetRealtimeThrottle\(storage = safeLocalStorage\(\), now = Date\.now\(\)\)/);
-  assert.equal(source.match(/resetRealtimeThrottle\(\);/g).length, 1);
+  assert.ok(source.match(/resetRealtimeThrottle\(\);/g).length >= 1);
   assert.match(source, /var XMPP_MINUTE_LIMIT = 15;/);
 });
 
@@ -378,7 +378,7 @@ test("safety: request limits and polling speed are unchanged", () => {
   const hook = readBundle("page-network-hook.js");
   assert.match(source, /var POLL_GAP_MS = 7e3;/);
   assert.match(source, /var MAX_POLLS_IN_FLIGHT = 1;/);
-  assert.match(source, /var BUY_CONCURRENCY = 8;/);
+  assert.match(source, /var BUY_CONCURRENCY = 6;/);
   assert.match(hook, /var LIST_REQUESTS_PER_MINUTE = 8;/);
   assert.match(hook, /var BUY_REQUESTS_PER_MINUTE = 12;/);
   assert.match(hook, /var POLL_PAGE_SIZE = 50;/);

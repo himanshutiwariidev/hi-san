@@ -1035,18 +1035,38 @@ chrome.storage.onChanged.addListener(async (changes) => {
 });
 var brakeNoticeTimer;
 function paintSafetyBrake(brake) {
-  const element2 = document.querySelector("#safety-brake");
-  if (!element2) {
+  const wrapper = document.querySelector("#safety-brake");
+  if (!wrapper) {
     return;
   }
   const notice = safetyBrakeNotice(brake);
-  element2.hidden = !notice;
-  element2.textContent = notice ?? "";
+  wrapper.hidden = !notice;
+  const textEl = document.querySelector("#safety-brake-text");
+  if (textEl) textEl.textContent = notice ?? "";
   window.clearTimeout(brakeNoticeTimer);
   if (notice && brake) {
     brakeNoticeTimer = window.setTimeout(() => paintSafetyBrake(brake), Math.max(1e3, brake.until - Date.now() + 500));
   }
 }
+document.querySelector("#resume-bot")?.addEventListener("click", async () => {
+  const btn = document.querySelector("#resume-bot");
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "Resuming...";
+  }
+  try {
+    // Clear safety brake from storage — bot will immediately resume polling
+    await chrome.storage.local.remove([SAFETY_BRAKE_STORAGE_KEY, "lastSafetyBrake", "safetyBrakeReloadedFor"]);
+    // Hide the safety brake notice immediately
+    const wrapper = document.querySelector("#safety-brake");
+    if (wrapper) wrapper.hidden = true;
+  } catch {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = "▶ Resume Now";
+    }
+  }
+});
 void chrome.storage.local.get([SAFETY_BRAKE_STORAGE_KEY]).then((items) => paintSafetyBrake(items[SAFETY_BRAKE_STORAGE_KEY])).catch(() => void 0);
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === "local" && changes[SAFETY_BRAKE_STORAGE_KEY]) {
