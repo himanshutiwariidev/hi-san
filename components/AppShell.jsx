@@ -4,6 +4,7 @@ import { Suspense, useCallback, useEffect, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import Sidebar from "@/components/Sidebar";
 import { AppContext } from "@/components/AppContext";
+import { ExtensionStatusProvider, ExtensionUpdatePopup } from "@/components/ExtensionUpdate";
 import { TextButton } from "@/components/ui/buttons";
 import { apiClient, errorMessage } from "@/lib/api";
 import { readSelectedBusinessId, saveSelectedBusinessId } from "@/lib/session";
@@ -49,6 +50,7 @@ export default function AppShell({ children }) {
 
   return (
     <AppContext.Provider value={{ me, setMe, business, businesses, reloadBusinesses }}>
+      <ExtensionStatusProvider>
       <div className="grid min-h-screen grid-cols-[260px_1fr] max-[760px]:grid-cols-1">
         <Suspense>
           <Sidebar isAdmin={me.role !== "member"} />
@@ -89,6 +91,8 @@ export default function AppShell({ children }) {
           </main>
         </div>
       </div>
+      <ExtensionUpdatePopup />
+      </ExtensionStatusProvider>
     </AppContext.Provider>
   );
 }

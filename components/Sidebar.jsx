@@ -4,7 +4,8 @@ import Link from "next/link";
 import Logo from "@/components/Logo";
 import { usePathname, useSearchParams } from "next/navigation";
 import Icon from "@/components/ui/Icon";
-import { APP_VERSION, EXTENSION_DOWNLOAD_URL, EXTENSION_VERSION } from "@/lib/version";
+import { SidebarDownload, SidebarHowToUse } from "@/components/ExtensionUpdate";
+import { APP_VERSION } from "@/lib/version";
 
 const navigation = [
   { href: "/", label: "Dashboard", icon: "dashboard" },
@@ -83,17 +84,10 @@ export default function Sidebar({ isAdmin }) {
         })}
       </nav>
 
-      <a
-        href={EXTENSION_DOWNLOAD_URL}
-        download={`hi-san-bot-extension-${EXTENSION_VERSION}.zip`}
-        className="flex items-center gap-2.5 rounded-xl border border-accent-border px-3 py-2.5 text-accent-dark hover:bg-accent-soft"
-      >
-        <Icon name="download" className="size-[18px] shrink-0" />
-        <span className="grid leading-tight">
-          <span className="font-semibold">Download extension</span>
-          <span className="text-xs text-muted tabular-nums">Latest: v{EXTENSION_VERSION}</span>
-        </span>
-      </a>
+      <div className="grid gap-2.5">
+        <SidebarDownload />
+        <SidebarHowToUse />
+      </div>
     </aside>
   );
 }
