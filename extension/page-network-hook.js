@@ -249,10 +249,15 @@ ${body}`;
     const text = String(value ?? "").trim();
     return /^\d{4,}$/.test(text) ? text : "";
   }
+  var cachedGlid = "";
   function readGlid() {
+    if (cachedGlid) {
+      return cachedGlid;
+    }
     try {
       const fromWindow = numericId(window.glid);
       if (fromWindow) {
+        cachedGlid = fromWindow;
         return fromWindow;
       }
     } catch {
@@ -260,6 +265,7 @@ ${body}`;
     try {
       const fromStorage = numericId(window.localStorage.getItem("glid"));
       if (fromStorage) {
+        cachedGlid = fromStorage;
         return fromStorage;
       }
     } catch {
@@ -274,11 +280,16 @@ ${body}`;
     };
     const glidCookie = cookies.match(/(?:^|;\s*)glid=([^;]+)/);
     if (glidCookie && numericId(decode(glidCookie[1]))) {
-      return numericId(decode(glidCookie[1]));
+      cachedGlid = numericId(decode(glidCookie[1]));
+      return cachedGlid;
     }
     const visitor = cookies.match(/(?:^|;\s*)ImeshVisitor=([^;]+)/);
     const fromVisitor = visitor ? decode(visitor[1]).match(/glid=([^|&]+)/) : null;
-    return fromVisitor ? numericId(fromVisitor[1]) : "";
+    if (fromVisitor && numericId(fromVisitor[1])) {
+      cachedGlid = numericId(fromVisitor[1]);
+      return cachedGlid;
+    }
+    return "";
   }
   async function postJson(url, body) {
     const startedAt = Date.now();
@@ -339,17 +350,21 @@ ${body}`;
       const iso = typeof payload.iso === "string" && payload.iso ? payload.iso : "";
       const body = iso ? buildDisplayRequest(glid, { iso }) : buildDisplayRequest(glid, displayRequestTemplate);
       const raw2 = await postJson(BL_DISPLAY_DATA_URL, body);
+      if (raw2.result.status === 401 || raw2.result.status === 403) cachedGlid = "";
       return { ...raw2, result: { ...raw2.result, glid } };
     }
     if (type === "IM_BL_EXPIRED_FETCH") {
       const raw2 = await postJson(BL_DISPLAY_DATA_URL, buildExpiredDisplayRequest(glid));
+      if (raw2.result.status === 401 || raw2.result.status === 403) cachedGlid = "";
       return { ...raw2, result: { ...raw2.result, glid } };
     }
     if (type === "IM_BL_MARK_SHORTLIST") {
       const raw2 = await postJson(MARK_SHORTLIST_URL, { ...payload, glusrid: glid });
+      if (raw2.result.status === 401 || raw2.result.status === 403) cachedGlid = "";
       return { ...raw2, result: { ...raw2.result, glid } };
     }
     const raw = await postJson(BL_CONTACT_BUY_URL, { ...payload, glusrId: glid });
+    if (raw.result.status === 401 || raw.result.status === 403) cachedGlid = "";
     return { ...raw, result: { ...raw.result, glid } };
   }
   function announcePurchase({ result, body }) {

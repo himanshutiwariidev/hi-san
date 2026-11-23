@@ -2436,11 +2436,11 @@
     try {
       const channel = new BroadcastChannel(REALTIME_CHANNEL_NAME);
       channel.addEventListener("message", (event) => {
-        resetRealtimeThrottleWhileWatching();
         const leads = parseRealtimeLeadMessage(event.data);
         if (leads.length) {
           void decideArrivedLeads(leads, "push").catch(() => void 0);
         }
+        resetRealtimeThrottleWhileWatching();
       });
     } catch {
     }
